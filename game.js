@@ -5,7 +5,12 @@ class LimitManager {
     constructor() {
         this.limitUpPercent = 0.10;  // 涨停幅度 10%
         this.limitDownPercent = 0.10; // 跌停幅度 10%
-        this.circuitBreakerThreshold = 0.20; // 熔断阈值 20%
+        // P2-1 Fix: previous threshold (0.20 = 20%) was unreachable because prices are
+        // already clamped to +/-10% by the daily price limit. The circuit breaker is
+        // meant to detect abnormal single-tick volatility (e.g. a fat-finger or stale
+        // data spike), so use a threshold based on per-tick move instead of intraday
+        // move vs prevClose.
+        this.circuitBreakerThreshold = 0.05; // 5% per-tick move (was 20% intraday)
         this.circuitBreakerCooldown = 3; // 熔断冷却周期数
         this.circuitBreakerStatus = new Map(); // 记录每只股票的熔断状态
     }
@@ -54,8 +59,12 @@ class LimitManager {
     }
 
     // 检查是否需要熔断
-    checkCircuitBreaker(code, price, prevClose) {
-        const change = Math.abs((price - prevClose) / prevClose);
+    // P2-1 Fix: judge based on the per-tick move (price vs prevPrice) rather than the
+    // per-day move (price vs prevClose). The per-day move is bounded by the +/-10%
+    // limit, so the previous comparison (threshold 0.20) could never fire.
+    checkCircuitBreaker(code, price, prevPrice) {
+        if (!prevPrice || prevPrice <= 0) return false;
+        const change = Math.abs((price - prevPrice) / prevPrice);
         if (change >= this.circuitBreakerThreshold) {
             return true;
         }
@@ -94,6 +103,85 @@ class LimitManager {
     }
 }
 
+// P1-2 Fix: round to 2 decimals (cents) to prevent IEEE754 float drift on money.
+// Naive `Math.round(n * 100) / 100` has the classic JS bug where 1.005 * 100 is
+// actually 100.49999999999999, so it rounds down to 1.00 instead of 1.01. We use
+// sign-aware epsilon to nudge borderline values in the right direction.
+function round2(n) {
+    if (typeof n !== 'number' || !isFinite(n)) return 0;
+    const sign = n < 0 ? -1 : 1;
+    return Math.round((n + sign * Number.EPSILON) * 100) / 100;
+}
+
+// P0-1 Fix: HTML escape utility to prevent XSS when rendering user-controlled data via innerHTML
+function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value).replace(/[&<>"']/g, function (c) {
+        return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+    });
+}
+
+// P0-1 Fix: Sanitize import data to reject malformed/malicious payloads
+function sanitizeUserData(raw) {
+    if (!raw || typeof raw !== 'object') throw new Error('Invalid data');
+    if (typeof raw.username !== 'string' || raw.username.length < 2 || raw.username.length > 20) {
+        throw new Error('Invalid username');
+    }
+    // Username whitelist: letters, digits, Chinese, underscore, hyphen (mirrors register() validation)
+    if (!/^[\u4e00-\u9fa5a-zA-Z0-9_\-]+$/.test(raw.username)) {
+        throw new Error('Invalid username characters');
+    }
+    if (typeof raw.passwordHash !== 'string' || !/^[0-9a-f]{1,16}$/.test(raw.passwordHash)) {
+        throw new Error('Invalid password hash');
+    }
+    if (!Array.isArray(raw.saves)) raw.saves = [];
+    if (!Array.isArray(raw.achievements)) raw.achievements = [];
+    if (typeof raw.createdAt !== 'number' || !isFinite(raw.createdAt)) raw.createdAt = Date.now();
+    if (typeof raw.tutorialCompleted !== 'boolean') raw.tutorialCompleted = false;
+    if (typeof raw.theme !== 'string' || !['dark', 'light', 'festival'].includes(raw.theme)) raw.theme = 'dark';
+    if (typeof raw.refreshRate !== 'number' || !isFinite(raw.refreshRate) || raw.refreshRate <= 0) raw.refreshRate = 3000;
+    if (typeof raw.lang !== 'string' || !['zh-CN', 'en-US'].includes(raw.lang)) raw.lang = 'zh-CN';
+    return raw;
+}
+
+// P0-1 Fix: Validate a single save object to reject malicious content
+function sanitizeSaveData(raw) {
+    if (!raw || typeof raw !== 'object') throw new Error('Invalid save');
+    const save = {};
+    save.id = typeof raw.id === 'string' ? raw.id : (Crypto && Crypto.uuid ? Crypto.uuid() : Date.now().toString());
+    save.createdAt = typeof raw.createdAt === 'number' && isFinite(raw.createdAt) ? raw.createdAt : Date.now();
+    save.fund = Number.isFinite(raw.fund) ? Number(raw.fund) : 1000000;
+    save.initialFund = Number.isFinite(raw.initialFund) ? Number(raw.initialFund) : save.fund;
+    save.name = (typeof raw.name === 'string' && raw.name.length >= 1 && raw.name.length <= 20)
+        ? raw.name : '';
+    // Name: restrict to safe character set (Chinese, letters, digits, limited punctuation)
+    if (save.name && !/^[\u4e00-\u9fa5a-zA-Z0-9\s\-_\.，。！？、：""''（）【】]+$/.test(save.name)) {
+        save.name = '';
+    }
+    save.holdings = (raw.holdings && typeof raw.holdings === 'object') ? raw.holdings : {};
+    save.records = Array.isArray(raw.records) ? raw.records.slice(0, 100) : [];
+    save.watchlist = Array.isArray(raw.watchlist) ? raw.watchlist.filter(c => typeof c === 'string' && /^\d{6}$/.test(c)) : [];
+    save.achievements = Array.isArray(raw.achievements) ? raw.achievements.filter(a => typeof a === 'string' && a.length < 64) : [];
+    // P1-3 Fix: Validate settings. A sane fee must be in [0, 0.01] (1% is already an
+    // absurd upper bound for any real exchange). Out-of-range values reset to the
+    // default rather than being silently clamped, to prevent an attacker from
+    // setting a "valid" but attacker-chosen value.
+    const rawSettings = (raw.settings && typeof raw.settings === 'object') ? raw.settings : {};
+    const saneFee = (v) => Number.isFinite(v) && v >= 0 && v <= 0.01 ? Number(v) : null;
+    save.settings = {
+        buyFee: saneFee(rawSettings.buyFee) !== null ? saneFee(rawSettings.buyFee) : 0.0003,
+        sellFee: saneFee(rawSettings.sellFee) !== null ? saneFee(rawSettings.sellFee) : 0.0013,
+        t0Mode: !!rawSettings.t0Mode,
+        tradeUnit: [1, 100].includes(rawSettings.tradeUnit) ? rawSettings.tradeUnit : 1
+    };
+    save.dayTrades = (raw.dayTrades && typeof raw.dayTrades === 'object') ? raw.dayTrades : {};
+    save.gameStats = (raw.gameStats && typeof raw.gameStats === 'object') ? raw.gameStats : {
+        tradeCount: 0, profitCount: 0, lossCount: 0, maxHoldings: 0, sectorsTraded: new Set(), dayTrades: 0
+    };
+    save.autoTrade = (raw.autoTrade && typeof raw.autoTrade === 'object') ? raw.autoTrade : { enabled: false, paused: false, configs: [], stats: {}, records: [] };
+    return save;
+}
+
 class StockSimulator {
     constructor() {
         this.currentUser = null;
@@ -114,11 +202,15 @@ class StockSimulator {
         this.tradingDayCount = 0;  // 交易日计数
         
         // 游戏时间系统
+        // P2-6 Fix: previously `tickPerMinute` was declared but never read. Time was always
+        // advanced by 1 minute per tick (game.js updateGameTime). Document the actual
+        // cadence and drop the dead field so future maintainers don't expect different behavior.
         this.gameTime = {
             hour: 9,
             minute: 30,
-            tickPerMinute: 2,  // 每个分钟需要的tick数
-            manualSet: false   // 标记是否手动设置过时间
+            manualSet: false,  // 标记是否手动设置过时间
+            // 1 tick = 1 minute of game time. Market is open 9:30-11:30 / 13:00-15:00.
+            minutesPerTick: 1
         };
         
         // 时间控制（设置面板新增功能）
@@ -309,7 +401,55 @@ class StockSimulator {
     }
 
     // 事件绑定
+    /**
+     * 为所有数字输入框注入自定义步进按钮（替代原生上下箭头）
+     * 原生箭头在各主题下配色突兀（白色块），改用主题化按钮保持视觉统一
+     */
+    enhanceNumberInputs() {
+        document.querySelectorAll('input[type="number"]').forEach(input => {
+            // 防止重复包装
+            if (input.closest('.num-stepper')) return;
+            const wrap = document.createElement('div');
+            wrap.className = 'num-stepper';
+            input.after(wrap);
+            wrap.appendChild(input);
+            wrap.insertAdjacentHTML('beforeend', `
+                <div class="num-stepper-btns">
+                    <button type="button" class="num-step-btn num-step-up" tabindex="-1" aria-label="+">
+                        <svg viewBox="0 0 10 6" width="10" height="6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1 5l4-4 4 4"/></svg>
+                    </button>
+                    <button type="button" class="num-step-btn num-step-down" tabindex="-1" aria-label="-">
+                        <svg viewBox="0 0 10 6" width="10" height="6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1 1l4 4 4-4"/></svg>
+                    </button>
+                </div>
+            `);
+        });
+    }
+
+    /**
+     * 自定义步进按钮点击处理（事件委托）
+     * 调用原生 stepUp/stepDown 以自动遵守 min/max/step，并派发事件
+     * 触发 game.js 中已有的 input/change 监听（如预估金额实时计算）
+     */
+    handleNumberStepperClick(e) {
+        const btn = e.target.closest('.num-step-btn');
+        if (!btn) return;
+        const input = btn.closest('.num-stepper')?.querySelector('input');
+        if (!input || input.disabled || input.readOnly) return;
+        if (btn.classList.contains('num-step-up')) {
+            input.stepUp();
+        } else {
+            input.stepDown();
+        }
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
     bindEvents() {
+        // 数字输入框统一注入主题化步进按钮（需在绑定其他事件前完成包装）
+        this.enhanceNumberInputs();
+        document.addEventListener('click', (e) => this.handleNumberStepperClick(e));
+
         // 登录/注册标签切换
         document.querySelectorAll('.tab-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
@@ -778,41 +918,45 @@ class StockSimulator {
     }
 
     // 登录
-    login() {
-        console.log('登录方法被调用');
+    // P1-4 Fix: never log password, username, or password hashes to console.
+    // Uses async PBKDF2 verification; legacy 8-char hashes are auto-upgraded on success.
+    async login() {
         const username = document.getElementById('login-username').value.trim();
         const password = document.getElementById('login-password').value;
         const errorEl = document.getElementById('login-error');
 
-        console.log('用户名:', username, '密码长度:', password.length);
-
         if (!username || !password) {
             errorEl.textContent = I18n.t('auth.loginError.empty');
-            console.log('错误: 用户名或密码为空');
             return;
         }
 
         const user = this.users[username];
-        console.log('用户数据:', user);
         if (!user) {
             errorEl.textContent = I18n.t('auth.loginError.userNotFound');
-            console.log('错误: 用户不存在');
             return;
         }
 
-        const hashedPassword = Crypto.hash(password);
-        console.log('输入密码哈希:', hashedPassword, '存储密码哈希:', user.passwordHash);
-        if (hashedPassword !== user.passwordHash) {
+        let verifyResult;
+        try {
+            verifyResult = await Crypto.verifyPassword(password, user.passwordHash);
+        } catch (e) {
             errorEl.textContent = I18n.t('auth.loginError.wrongPassword');
-            console.log('错误: 密码不匹配');
+            return;
+        }
+        if (!verifyResult || !verifyResult.valid) {
+            errorEl.textContent = I18n.t('auth.loginError.wrongPassword');
             return;
         }
 
-        console.log('密码验证成功，准备登录');
+        // P1-4 Fix: if the stored hash was legacy, transparently upgrade it.
+        if (verifyResult.upgradedHash) {
+            user.passwordHash = verifyResult.upgradedHash;
+            this.users[username] = user;
+            try { this.saveUsers(); } catch (_) { /* best-effort */ }
+        }
+
         this.currentUser = { username, ...user };
-        console.log('currentUser设置成功:', this.currentUser);
         localStorage.setItem('stock_simulator_last_user', username);
-        console.log('localStorage设置成功');
         
         // 恢复用户主题偏好（不触发保存，避免循环）
         const savedTheme = this.currentUser.theme || 'dark';
@@ -834,47 +978,48 @@ class StockSimulator {
             I18n.setLanguage(this.currentUser.lang, true);
         }
 
-        console.log('准备调用showSaveSelect');
         this.showSaveSelect();
-        console.log('showSaveSelect调用完成');
     }
 
     // 注册
-    register() {
-        console.log('注册方法被调用');
+    // P1-4 Fix: never log password/username/confirm length to console.
+    // Uses async PBKDF2 hashing (with random per-user salt).
+    async register() {
         const username = document.getElementById('reg-username').value.trim();
         const password = document.getElementById('reg-password').value;
         const confirm = document.getElementById('reg-confirm').value;
         const errorEl = document.getElementById('reg-error');
 
-        console.log('用户名:', username, '密码长度:', password.length, '确认密码长度:', confirm.length);
-
         if (!username || username.length < 2 || username.length > 20) {
             errorEl.textContent = I18n.t('auth.regError.usernameLength');
-            console.log('错误: 用户名长度不符合要求');
             return;
         }
 
         if (!password || password.length < 6 || password.length > 20) {
             errorEl.textContent = I18n.t('auth.regError.passwordLength');
-            console.log('错误: 密码长度不符合要求');
             return;
         }
 
         if (password !== confirm) {
             errorEl.textContent = I18n.t('auth.regError.passwordMismatch');
-            console.log('错误: 两次密码不一致');
             return;
         }
 
         if (this.users[username]) {
             errorEl.textContent = I18n.t('auth.regError.userExists');
-            console.log('错误: 用户名已存在');
+            return;
+        }
+
+        let passwordHash;
+        try {
+            passwordHash = await Crypto.hashAsync(password);
+        } catch (e) {
+            errorEl.textContent = I18n.t('auth.regError.generic');
             return;
         }
 
         this.users[username] = {
-            passwordHash: Crypto.hash(password),
+            passwordHash,
             createdAt: Date.now(),
             saves: [],
             achievements: [],
@@ -893,7 +1038,7 @@ class StockSimulator {
         this.saveUsers();
         errorEl.textContent = I18n.t('auth.regSuccess');
         errorEl.style.color = '#52c41a';
-        
+
         setTimeout(() => {
             document.querySelector('[data-tab="login"]').click();
             errorEl.textContent = '';
@@ -1037,17 +1182,22 @@ class StockSimulator {
         saves.forEach((save, index) => {
             const item = document.createElement('div');
             item.className = 'save-item';
-            const saveName = save.name || I18n.t('save.defaultName', { index: index + 1 });
-            const dateStr = new Date(save.createdAt).toLocaleDateString(I18n.getCurrentLanguage());
+            // P0-1 Fix: escape user-controlled save name to prevent XSS
+            const saveName = escapeHtml(save.name || I18n.t('save.defaultName', { index: index + 1 }));
+            const dateStr = escapeHtml(new Date(save.createdAt).toLocaleDateString(I18n.getCurrentLanguage()));
+            const fundText = escapeHtml(this.formatMoney(save.fund));
+            const enterText = escapeHtml(I18n.t('common.enter'));
+            const renameText = escapeHtml(I18n.t('common.rename'));
+            const deleteText = escapeHtml(I18n.t('common.delete'));
             item.innerHTML = `
                 <div class="save-info">
                     <h4>${saveName}</h4>
-                    <p>${I18n.t('save.info', { fund: this.formatMoney(save.fund), date: dateStr })}</p>
+                    <p>${I18n.t('save.info', { fund: fundText, date: dateStr })}</p>
                 </div>
                 <div class="save-actions">
-                    <button class="btn-enter" data-index="${index}">${I18n.t('common.enter')}</button>
-                    <button class="btn-rename" data-index="${index}">${I18n.t('common.rename')}</button>
-                    <button class="btn-delete" data-index="${index}">${I18n.t('common.delete')}</button>
+                    <button class="btn-enter" data-index="${index}">${enterText}</button>
+                    <button class="btn-rename" data-index="${index}">${renameText}</button>
+                    <button class="btn-delete" data-index="${index}">${deleteText}</button>
                 </div>
             `;
             listEl.appendChild(item);
@@ -1174,6 +1324,17 @@ class StockSimulator {
                 sectorsTraded: new Set(),
                 dayTrades: 0
             };
+        }
+        // P1-3 Fix: validate settings (tradeUnit, fees) on load. Defensive: bad settings here would
+        // later cause division-by-zero or NaN quantities. Default to safe values.
+        if (!this.currentSave.settings || typeof this.currentSave.settings !== 'object') {
+            this.currentSave.settings = { buyFee: 0.0003, sellFee: 0.0013, t0Mode: false, tradeUnit: 1 };
+        } else {
+            const s = this.currentSave.settings;
+            if (typeof s.buyFee !== 'number' || !isFinite(s.buyFee) || s.buyFee < 0 || s.buyFee > 0.01) s.buyFee = 0.0003;
+            if (typeof s.sellFee !== 'number' || !isFinite(s.sellFee) || s.sellFee < 0 || s.sellFee > 0.01) s.sellFee = 0.0013;
+            if (typeof s.t0Mode !== 'boolean') s.t0Mode = false;
+            if (![1, 100].includes(s.tradeUnit)) s.tradeUnit = 1;
         }
         // Set类型在JSON序列化后会变成{}，需要重新转换
         if (!(this.currentSave.gameStats.sectorsTraded instanceof Set)) {
@@ -1374,7 +1535,13 @@ class StockSimulator {
     // 初始化市场数据
     initMarketData() {
         this.stockData.clear();
+        // P0-2 Fix: build a code -> stock cache once so O(n) `StockPool.find` calls become O(1) lookups
+        if (!this._stockPoolByCode) {
+            this._stockPoolByCode = new Map();
+        }
+        this._stockPoolByCode.clear();
         StockPool.forEach(stock => {
+            this._stockPoolByCode.set(stock.code, stock);
             const basePrice = this.generateBasePrice(stock);
             const history = this.generateHistory(basePrice);
             const lastHistory = history[history.length - 1];
@@ -1480,20 +1647,22 @@ class StockSimulator {
 
     // 更新游戏时间
     updateGameTime() {
-        // 每tick增加1分钟
-        this.gameTime.minute++;
-        
+        // P2-6 Fix: read the per-tick minute increment from the field rather than hardcoding.
+        // Default to 1 to preserve prior behavior; tests can lower it to speed up the clock.
+        const step = (this.gameTime.minutesPerTick | 0) || 1;
+        this.gameTime.minute += step;
+
         // 处理分钟进位
         if (this.gameTime.minute >= 60) {
-            this.gameTime.hour++;
-            this.gameTime.minute = 0;
+            this.gameTime.hour += Math.floor(this.gameTime.minute / 60);
+            this.gameTime.minute = this.gameTime.minute % 60;
         }
-        
+
         // 处理小时进位（24小时制）
         if (this.gameTime.hour >= 24) {
-            this.gameTime.hour = 0;
+            this.gameTime.hour = this.gameTime.hour % 24;
         }
-        
+
         // 更新时间显示
         this.updateTimeDisplay();
     }
@@ -1802,22 +1971,25 @@ class StockSimulator {
                 change = (Math.random() - 0.5) * 0.04;
             }
             const newPrice = Math.max(0.01, data.price * (1 + change));
-            
+            // P2-1 Fix: capture the pre-clamp price for per-tick circuit-breaker check
+            const preClampPrice = data.price;
+
             // 使用涨跌停管理器限制价格
             data.price = this.limitManager.clampPrice(newPrice, data.prevClose);
             data.price = this.limitManager.roundToTick(data.price);
-            
+
             // 实时验证价格是否在涨跌停范围内
             if (!this.limitManager.isPriceWithinLimits(data.price, data.prevClose)) {
                 console.warn(`股票 ${code} 价格 ${data.price} 超出涨跌停范围，已自动调整`);
                 data.price = this.limitManager.clampPrice(data.price, data.prevClose);
                 data.price = this.limitManager.roundToTick(data.price);
             }
-            
-            // 检查是否触发熔断
-            if (this.limitManager.checkCircuitBreaker(code, data.price, data.prevClose)) {
+
+            // P2-1 Fix: judge circuit breaker on the per-tick move (pre-clamp price vs new
+            // attempted price), not on the per-day move vs prevClose (which is bounded
+            // by the +/-10% daily limit and so the previous 0.20 threshold was unreachable).
+            if (this.limitManager.checkCircuitBreaker(code, newPrice, preClampPrice)) {
                 this.limitManager.triggerCircuitBreaker(code);
-                console.log(`股票 ${code} 触发熔断，暂停交易 ${this.limitManager.circuitBreakerCooldown} 个周期`);
             }
             
             // 更新熔断冷却
@@ -1940,15 +2112,20 @@ class StockSimulator {
             const changeSymbol = change >= 0 ? '+' : '';
             const activeClass = this.selectedStock && this.selectedStock.code === stock.code ? 'active' : '';
             const isWatched = watchlist.includes(stock.code);
+            // P0-1 Fix: escape all user-controllable fields
+            const stockName = escapeHtml(stock.name);
+            const stockCode = escapeHtml(stock.code);
+            const priceText = escapeHtml(data.price.toFixed(2));
+            const changeText = escapeHtml(change);
             
             html += `
-                <div class="stock-item ${activeClass}" data-code="${stock.code}">
+                <div class="stock-item ${activeClass}" data-code="${stockCode}">
                     <div class="stock-item-info">
-                        <div class="name">${stock.name}</div>
-                        <div class="code">${stock.code}</div>
+                        <div class="name">${stockName}</div>
+                        <div class="code">${stockCode}</div>
                     </div>
-                    <div class="stock-item-price ${changeClass}">${data.price.toFixed(2)}</div>
-                    <div class="stock-item-change ${changeClass}">${changeSymbol}${change}%</div>
+                    <div class="stock-item-price ${changeClass}">${priceText}</div>
+                    <div class="stock-item-change ${changeClass}">${changeSymbol}${changeText}%</div>
                     ${isWatched ? '<div class="watch-badge">★</div>' : ''}
                 </div>
             `;
@@ -2133,7 +2310,8 @@ class StockSimulator {
     }
 
     // 修改密码
-    changePassword() {
+    // P1-4 Fix: use async PBKDF2 verification (and persist the new hash)
+    async changePassword() {
         const currentPassword = document.getElementById('current-password').value;
         const newPassword = document.getElementById('new-password').value;
         const confirmPassword = document.getElementById('confirm-password').value;
@@ -2158,9 +2336,16 @@ class StockSimulator {
             return;
         }
 
-        // 验证当前密码
-        const hashedCurrentPassword = Crypto.hash(currentPassword);
-        if (hashedCurrentPassword !== this.currentUser.passwordHash) {
+        // 验证当前密码（使用 async 验证）
+        let verifyResult;
+        try {
+            verifyResult = await Crypto.verifyPassword(currentPassword, this.currentUser.passwordHash);
+        } catch (e) {
+            errorEl.textContent = I18n.t('password.wrongCurrent');
+            errorEl.style.display = 'block';
+            return;
+        }
+        if (!verifyResult || !verifyResult.valid) {
             errorEl.textContent = I18n.t('password.wrongCurrent');
             errorEl.style.display = 'block';
             return;
@@ -2173,10 +2358,17 @@ class StockSimulator {
             return;
         }
 
-        // 更新密码
-        const hashedNewPassword = Crypto.hash(newPassword);
+        // 更新密码（使用新算法生成新哈希）
+        let hashedNewPassword;
+        try {
+            hashedNewPassword = await Crypto.hashAsync(newPassword);
+        } catch (e) {
+            errorEl.textContent = I18n.t('password.updateFailed');
+            errorEl.style.display = 'block';
+            return;
+        }
         this.currentUser.passwordHash = hashedNewPassword;
-        
+
         // 同步到 users 对象
         if (this.currentUser.username && this.users[this.currentUser.username]) {
             this.users[this.currentUser.username].passwordHash = hashedNewPassword;
@@ -2815,7 +3007,10 @@ class StockSimulator {
             : amount * this.currentSave.settings.sellFee;
         const total = type === 'buy' ? amount + fee : amount - fee;
 
-        document.getElementById(`${type}-estimate`).textContent = I18n.t('trade.estimateWithFee', { total: this.formatMoney(total), fee: fee.toFixed(2) });
+        // P1-2 Fix: round estimated fee/total to cents to match actual charge
+        const feeRounded = round2(fee);
+        const totalRounded = round2(total);
+        document.getElementById(`${type}-estimate`).textContent = I18n.t('trade.estimateWithFee', { total: this.formatMoney(totalRounded), fee: feeRounded.toFixed(2) });
     }
 
     // 设置交易数量
@@ -2862,16 +3057,20 @@ class StockSimulator {
             const pnl = (data.price - holding.avgPrice) * holding.quantity;
             const pnlClass = pnl >= 0 ? 'up' : 'down';
             const pnlSymbol = pnl >= 0 ? '+' : '';
+            // P0-1 Fix: escape all user-controllable fields
+            const codeEsc = escapeHtml(code);
+            const nameEsc = escapeHtml(holding.name);
+            const pnlText = escapeHtml(this.formatMoney(pnl));
 
             html += `
-                <div class="holding-item" data-code="${code}">
+                <div class="holding-item" data-code="${codeEsc}">
                     <div class="holding-info">
-                        <div class="name">${holding.name}</div>
-                        <div class="code">${code}</div>
+                        <div class="name">${nameEsc}</div>
+                        <div class="code">${codeEsc}</div>
                     </div>
                     <div class="holding-qty">
-                        <div class="qty">${I18n.t('trade.shares', { quantity: holding.quantity })}</div>
-                        <div class="pnl ${pnlClass}">${pnlSymbol}¥${this.formatMoney(pnl)}</div>
+                        <div class="qty">${escapeHtml(I18n.t('trade.shares', { quantity: holding.quantity }))}</div>
+                        <div class="pnl ${pnlClass}">${pnlSymbol}¥${pnlText}</div>
                     </div>
                 </div>
             `;
@@ -2912,8 +3111,28 @@ class StockSimulator {
     executeTrade(type) {
         // 获取交易参数
         const code = document.getElementById(`${type}-code`).value;
-        const price = parseFloat(document.getElementById(`${type}-price`).value);
-        const quantity = parseInt(document.getElementById(`${type}-quantity`).value);
+        const priceRaw = document.getElementById(`${type}-price`).value;
+        const quantityRaw = document.getElementById(`${type}-quantity`).value;
+
+        // P2-3 Fix: parse with explicit Number() and validate type/range BEFORE using the value.
+        // parseFloat("3.7") silently becomes 3, parseInt("100abc") silently becomes 100, and
+        // 1e9 is silently accepted. Reject non-integer/negative/huge values to avoid mis-trades.
+        const price = Number(priceRaw);
+        const quantity = Number(quantityRaw);
+        if (typeof priceRaw !== 'string' || priceRaw.trim() === '' || !Number.isFinite(price) || price <= 0 || price > 1e7) {
+            alert(I18n.t('trade.invalidPrice'));
+            return;
+        }
+        if (typeof quantityRaw !== 'string' || quantityRaw.trim() === '' || !Number.isInteger(quantity) || quantity <= 0 || quantity > 1e9) {
+            alert(I18n.t('trade.invalidQuantity'));
+            return;
+        }
+        // P2-3 Fix: quantity must be a multiple of the configured trade unit
+        const tradeUnit = (this.currentSave.settings && this.currentSave.settings.tradeUnit) || 1;
+        if (quantity % tradeUnit !== 0) {
+            alert(I18n.t('trade.invalidQuantityUnit', { unit: tradeUnit }));
+            return;
+        }
 
         // 验证交易参数
         const validationResult = this.validateTradeParameters(type, code, price, quantity);
@@ -3035,8 +3254,9 @@ class StockSimulator {
         }
 
         // 执行买入
-        this.currentSave.fund -= totalCost;
-        
+        // P1-2 Fix: round money to cents to prevent float drift
+        this.currentSave.fund = round2(this.currentSave.fund - totalCost);
+
         if (!this.currentSave.holdings[code]) {
             this.currentSave.holdings[code] = {
                 name: stock.name,
@@ -3047,9 +3267,9 @@ class StockSimulator {
         }
 
         const holding = this.currentSave.holdings[code];
-        const newTotalCost = holding.totalCost + totalCost;
+        const newTotalCost = round2(holding.totalCost + totalCost);
         holding.quantity += quantity;
-        holding.avgPrice = newTotalCost / holding.quantity;
+        holding.avgPrice = round2(newTotalCost / holding.quantity);
         holding.totalCost = newTotalCost;
 
         // 记录当日买入
@@ -3090,12 +3310,16 @@ class StockSimulator {
 
         // 执行卖出
         const totalIncome = amount - fee;
-        this.currentSave.fund += totalIncome;
+        // P1-2 Fix: round money to cents
+        this.currentSave.fund = round2(this.currentSave.fund + totalIncome);
 
-        const pnl = (price - holding.avgPrice) * quantity;
-        
+        // P1-5 Fix: include sell fee in PnL so that achievements/stop-loss reflect realized profit
+        // pnl = (sell price - avg cost) * qty - sell fee (in cents precision)
+        const pnl = round2((price - holding.avgPrice) * quantity - fee);
+
         holding.quantity -= quantity;
-        holding.totalCost = holding.avgPrice * holding.quantity;
+        // P1-2 Fix: round remaining cost basis to cents
+        holding.totalCost = round2(holding.avgPrice * holding.quantity);
 
         if (holding.quantity === 0) {
             delete this.currentSave.holdings[code];
@@ -3201,16 +3425,25 @@ class StockSimulator {
                 const pnl = marketValue - holding.totalCost;
                 const pnlRate = holding.totalCost > 0 ? (pnl / holding.totalCost * 100) : 0;
                 const pnlClass = pnl >= 0 ? 'up' : 'down';
+                // P0-1 Fix: escape all user-controllable fields
+                const codeEsc = escapeHtml(code);
+                const nameEsc = escapeHtml(holding.name);
+                const qtyEsc = escapeHtml(String(holding.quantity));
+                const avgText = escapeHtml(holding.avgPrice.toFixed(2));
+                const priceText = escapeHtml(data.price.toFixed(2));
+                const mvText = escapeHtml(this.formatMoney(marketValue));
+                const pnlText = escapeHtml(this.formatMoney(pnl));
+                const rateText = escapeHtml(pnlRate.toFixed(2));
 
                 return `
-                    <tr data-code="${code}" style="cursor: pointer; hover: background-color: rgba(88, 166, 255, 0.1);">
-                        <td>${holding.name}<br><small>${code}</small></td>
-                        <td>${holding.quantity}</td>
-                        <td>¥${holding.avgPrice.toFixed(2)}</td>
-                        <td>¥${data.price.toFixed(2)}</td>
-                        <td>¥${this.formatMoney(marketValue)}</td>
-                        <td class="${pnlClass}">${pnl >= 0 ? '+' : ''}¥${this.formatMoney(pnl)}</td>
-                        <td class="${pnlClass}">${pnl >= 0 ? '+' : ''}${pnlRate.toFixed(2)}%</td>
+                    <tr data-code="${codeEsc}" style="cursor: pointer; hover: background-color: rgba(88, 166, 255, 0.1);">
+                        <td>${nameEsc}<br><small>${codeEsc}</small></td>
+                        <td>${qtyEsc}</td>
+                        <td>¥${avgText}</td>
+                        <td>¥${priceText}</td>
+                        <td>¥${mvText}</td>
+                        <td class="${pnlClass}">${pnl >= 0 ? '+' : ''}¥${pnlText}</td>
+                        <td class="${pnlClass}">${pnl >= 0 ? '+' : ''}${rateText}%</td>
                     </tr>
                 `;
             }).join('');
@@ -3240,15 +3473,17 @@ class StockSimulator {
                     menu.style.position = 'fixed';
                     menu.style.left = `${e.clientX}px`;
                     menu.style.top = `${e.clientY}px`;
+                    // P0-1 Fix: escape the code in data-code attribute
+                    const codeEsc = escapeHtml(code);
                     menu.innerHTML = `
-                        <div class="context-menu-item" data-action="trade" data-code="${code}">
-                            ${I18n.t('portfolio.contextMenu.trade')}
+                        <div class="context-menu-item" data-action="trade" data-code="${codeEsc}">
+                            ${escapeHtml(I18n.t('portfolio.contextMenu.trade'))}
                         </div>
-                        <div class="context-menu-item" data-action="auto-trade" data-code="${code}">
-                            ${I18n.t('portfolio.contextMenu.autoTrade')}
+                        <div class="context-menu-item" data-action="auto-trade" data-code="${codeEsc}">
+                            ${escapeHtml(I18n.t('portfolio.contextMenu.autoTrade'))}
                         </div>
-                        <div class="context-menu-item" data-action="view-detail" data-code="${code}">
-                            ${I18n.t('portfolio.contextMenu.viewDetail')}
+                        <div class="context-menu-item" data-action="view-detail" data-code="${codeEsc}">
+                            ${escapeHtml(I18n.t('portfolio.contextMenu.viewDetail'))}
                         </div>
                     `;
                     
@@ -3312,14 +3547,22 @@ class StockSimulator {
             recordsTbody.innerHTML = this.currentSave.records.slice(0, 20).map(record => {
                 const date = new Date(record.time);
                 const typeClass = record.type === 'buy' ? 'down' : 'up';
+                // P0-1 Fix: escape all user-controllable fields
+                const dateText = escapeHtml(date.toLocaleString(I18n.getCurrentLanguage()));
+                const recName = escapeHtml(record.name);
+                const recCode = escapeHtml(record.code);
+                const recPrice = escapeHtml(Number(record.price || 0).toFixed(2));
+                const recQty = escapeHtml(String(record.quantity || 0));
+                const recAmt = escapeHtml(this.formatMoney(Math.abs(record.amount || 0)));
+                const typeText = escapeHtml(I18n.t(record.type === 'buy' ? 'common.buy' : 'common.sell'));
                 return `
                     <tr>
-                        <td>${date.toLocaleString(I18n.getCurrentLanguage())}</td>
-                        <td>${record.name}<br><small>${record.code}</small></td>
-                        <td class="${typeClass}">${I18n.t(record.type === 'buy' ? 'common.buy' : 'common.sell')}</td>
-                        <td>¥${record.price.toFixed(2)}</td>
-                        <td>${record.quantity}</td>
-                        <td>¥${this.formatMoney(Math.abs(record.amount))}</td>
+                        <td>${dateText}</td>
+                        <td>${recName}<br><small>${recCode}</small></td>
+                        <td class="${typeClass}">${typeText}</td>
+                        <td>¥${recPrice}</td>
+                        <td>${recQty}</td>
+                        <td>¥${recAmt}</td>
                     </tr>
                 `;
             }).join('');
@@ -3370,14 +3613,15 @@ class StockSimulator {
         // 渲染成就列表
         const allAchievements = AchievementSystem.achievements.map(ach => {
             const unlocked = achievements.includes(ach.id);
+            // P0-1 Fix: escape achievement fields (icon, name, desc) when rendered as HTML
             return `
                 <div class="achievement-card ${unlocked ? 'unlocked' : 'locked'}">
-                    <div class="achievement-icon-small">${ach.icon}</div>
+                    <div class="achievement-icon-small">${escapeHtml(ach.icon)}</div>
                     <div class="achievement-info">
-                        <h4>${AchievementSystem.getName(ach)}</h4>
-                        <p>${AchievementSystem.getDesc(ach)}</p>
+                        <h4>${escapeHtml(AchievementSystem.getName(ach))}</h4>
+                        <p>${escapeHtml(AchievementSystem.getDesc(ach))}</p>
                     </div>
-                    <span class="achievement-level-badge ${ach.level}">${AchievementSystem.getLevelName(ach.level)}</span>
+                    <span class="achievement-level-badge ${escapeHtml(ach.level)}">${escapeHtml(AchievementSystem.getLevelName(ach.level))}</span>
                 </div>
             `;
         }).join('');
@@ -3741,8 +3985,15 @@ class StockSimulator {
 
     // 计算所有存档的统计数据（用于用户级统计）
     calculateStats() {
+        // P1-1 Fix: this function is called even when there's no active save; guard against undefined inputs
+        if (!this.currentUser) {
+            return { tradeCount: 0, totalProfit: 0, totalLoss: 0, maxHoldings: 0, sectorsTraded: 0, dayTrades: 0, currentGameTrades: 0, maxReturn: 0 };
+        }
         const saves = this.currentUser.saves || [];
-        
+        // P1-1 Fix: previous code referenced a bare `currentSave` identifier (uncaught ReferenceError).
+        // Use `this.currentSave` so it resolves to the active save (or null/undefined when none is loaded).
+        const currentSave = this.currentSave;
+
         let totalProfit = 0;
         let totalLoss = 0;
         let tradeCount = 0;
@@ -3754,7 +4005,7 @@ class StockSimulator {
             tradeCount += save.gameStats?.tradeCount || 0;
             maxHoldings = Math.max(maxHoldings, save.gameStats?.maxHoldings || 0);
             dayTrades += save.gameStats?.dayTrades || 0;
-            
+
             (save.gameStats?.sectorsTraded || []).forEach(s => sectorsTraded.add(s));
 
             // 计算盈亏
@@ -3763,6 +4014,12 @@ class StockSimulator {
             else totalLoss += Math.abs(pnl);
         });
 
+        // P1-1 Fix: when no save is active, return zeros for the per-save fields instead of throwing
+        const currentGameTrades = currentSave ? (currentSave.gameStats?.tradeCount || 0) : 0;
+        const maxReturn = currentSave && currentSave.initialFund > 0
+            ? ((currentSave.fund + this.calculateStockValue(currentSave)) - currentSave.initialFund) / currentSave.initialFund
+            : 0;
+
         return {
             tradeCount,
             totalProfit,
@@ -3770,9 +4027,8 @@ class StockSimulator {
             maxHoldings,
             sectorsTraded: sectorsTraded.size,
             dayTrades,
-            // 当前局的额外统计
-            currentGameTrades: currentSave?.gameStats?.tradeCount || 0,
-            maxReturn: currentSave ? ((currentSave.fund + this.calculateStockValue(currentSave)) - currentSave.initialFund) / currentSave.initialFund : 0
+            currentGameTrades,
+            maxReturn
         };
     }
 
@@ -4003,8 +4259,9 @@ class StockSimulator {
         const modal = document.getElementById('debug-modal');
         const select = document.getElementById('debug-achievement');
         
+        // P0-1 Fix: escape achievement id and name in option value/text
         select.innerHTML = AchievementSystem.achievements.map(ach =>
-            `<option value="${ach.id}">${AchievementSystem.getName(ach)} (${AchievementSystem.getLevelName(ach.level)})</option>`
+            `<option value="${escapeHtml(ach.id)}">${escapeHtml(AchievementSystem.getName(ach))} (${escapeHtml(AchievementSystem.getLevelName(ach.level))})</option>`
         ).join('');
         
         // 更新当前时间显示
@@ -4266,10 +4523,14 @@ class StockSimulator {
         currentAchievements.forEach(achId => {
             const ach = AchievementSystem.achievements.find(a => a.id === achId);
             if (ach) {
+                // P0-1 Fix: escape achId in id/value attributes and names in label
+                const achIdEsc = escapeHtml(achId);
+                const nameEsc = escapeHtml(AchievementSystem.getName(ach));
+                const levelEsc = escapeHtml(AchievementSystem.getLevelName(ach.level));
                 selectHtml += `
                     <div style="margin-bottom: 8px; display: flex; align-items: center;">
-                        <input type="checkbox" id="clear-ach-${achId}" value="${achId}" style="margin-right: 10px;">
-                        <label for="clear-ach-${achId}" style="flex: 1;">${AchievementSystem.getName(ach)} (${AchievementSystem.getLevelName(ach.level)})</label>
+                        <input type="checkbox" id="clear-ach-${achIdEsc}" value="${achIdEsc}" style="margin-right: 10px;">
+                        <label for="clear-ach-${achIdEsc}" style="flex: 1;">${nameEsc} (${levelEsc})</label>
                     </div>
                 `;
             }
@@ -4290,13 +4551,14 @@ class StockSimulator {
         modal.style.justifyContent = 'center';
         modal.style.zIndex = '2000';
         
+        // P0-1 Fix: escape i18n text rendered as HTML (defense in depth - i18n is static, but hostile translators or a poisoned bundle could inject)
         modal.innerHTML = `
             <div class="modal-content" style="min-width: 300px; max-width: 400px;">
-                <h3>${I18n.t('debug.clearSelectedTitle')}</h3>
+                <h3>${escapeHtml(I18n.t('debug.clearSelectedTitle'))}</h3>
                 ${selectHtml}
                 <div style="display: flex; gap: 10px;">
-                    <button id="confirm-clear-btn" class="btn-primary" style="flex: 1;">${I18n.t('debug.confirmClear')}</button>
-                    <button id="cancel-clear-btn" class="btn-secondary" style="flex: 1;">${I18n.t('common.cancel')}</button>
+                    <button id="confirm-clear-btn" class="btn-primary" style="flex: 1;">${escapeHtml(I18n.t('debug.confirmClear'))}</button>
+                    <button id="cancel-clear-btn" class="btn-secondary" style="flex: 1;">${escapeHtml(I18n.t('common.cancel'))}</button>
                 </div>
             </div>
         `;
@@ -4401,35 +4663,78 @@ class StockSimulator {
         input.onchange = (e) => {
             const file = e.target.files[0];
             if (!file) return;
-            
+
+            // P0-1 / P2-4 Fix: cap file size to prevent memory/CPU abuse from maliciously large backups
+            if (file.size > 5 * 1024 * 1024) {
+                alert(I18n.t('notification.importTooLarge'));
+                return;
+            }
+
             const reader = new FileReader();
             reader.onload = (event) => {
                 try {
                     const decrypted = Crypto.decrypt(event.target.result);
-                    const userData = JSON.parse(decrypted);
+                    if (typeof decrypted !== 'string') throw new Error('Decryption failed');
+                    const rawData = JSON.parse(decrypted);
 
-                    if (confirm(I18n.t('notification.importConfirm', { username: userData.username }))) {
-                        this.users[userData.username] = userData;
-                        this.saveUsers();
-                        this.currentUser = userData;
+                    // P0-1 Fix: schema-validate the imported payload to reject malicious/oversized structures
+                    const userData = sanitizeUserData(rawData);
+                    // P0-1 Fix: also sanitize each save (length-bounded, type-checked)
+                    userData.saves = userData.saves.map(s => sanitizeSaveData(s));
 
-                        // 恢复导入存档的主题偏好（不触发保存）
-                        const savedTheme = this.currentUser.theme || 'dark';
-                        document.body.className = savedTheme === 'light' ? 'light-theme' : savedTheme === 'festival' ? 'festival-theme' : '';
-                        const themeToggle = document.getElementById('theme-toggle');
-                        if (themeToggle) {
-                            themeToggle.textContent = savedTheme === 'light' ? '☀️' : savedTheme === 'festival' ? '🎉' : '🌙';
+                    const existing = this.users[userData.username];
+                    // P2-4 Fix: when the username already exists, offer a non-destructive merge path
+                    // (Replace or Cancel). Default to Replace only if user explicitly confirms.
+                    if (existing) {
+                        const choice = prompt(
+                            I18n.t('notification.importConflict', { username: userData.username }),
+                            'replace'
+                        );
+                        if (choice === null) return; // cancelled
+                        const normalized = String(choice).trim().toLowerCase();
+                        if (normalized !== 'replace' && normalized !== 'merge') {
+                            return;
                         }
-
-                        // 恢复导入存档的语言偏好
-                        if (this.currentUser.lang) {
-                            I18n.setLanguage(this.currentUser.lang, true);
+                        if (normalized === 'merge') {
+                            // Merge: combine saves (skip dup ids), keep local achievements/themes
+                            const existingSaves = new Set(existing.saves.map(s => s.id));
+                            userData.saves = [...existing.saves, ...userData.saves.filter(s => !existingSaves.has(s.id))];
+                            userData.saves = userData.saves.slice(0, 50);
+                            // Preserve local user preferences when merging
+                            userData.theme = existing.theme || userData.theme;
+                            userData.refreshRate = existing.refreshRate || userData.refreshRate;
+                            userData.lang = existing.lang || userData.lang;
+                            userData.tutorialCompleted = existing.tutorialCompleted || userData.tutorialCompleted;
                         }
-
-                        this.showSaveSelect();
-                        alert(I18n.t('notification.importSuccess'));
                     }
+
+                    // P2-4 Fix: confirm before applying the (possibly destructive) import
+                    const displayName = String(userData.username).replace(/[<>&"']/g, '');
+                    if (!confirm(I18n.t('notification.importConfirm', { username: displayName }))) {
+                        return;
+                    }
+
+                    this.users[userData.username] = userData;
+                    this.saveUsers();
+                    this.currentUser = userData;
+
+                    // 恢复导入存档的主题偏好（不触发保存）
+                    const savedTheme = this.currentUser.theme || 'dark';
+                    document.body.className = savedTheme === 'light' ? 'light-theme' : savedTheme === 'festival' ? 'festival-theme' : '';
+                    const themeToggle = document.getElementById('theme-toggle');
+                    if (themeToggle) {
+                        themeToggle.textContent = savedTheme === 'light' ? '☀️' : savedTheme === 'festival' ? '🎉' : '🌙';
+                    }
+
+                    // 恢复导入存档的语言偏好
+                    if (this.currentUser.lang) {
+                        I18n.setLanguage(this.currentUser.lang, true);
+                    }
+
+                    this.showSaveSelect();
+                    alert(I18n.t('notification.importSuccess'));
                 } catch (err) {
+                    // P0-1 Fix: do not leak error details to console for user-controlled input
                     alert(I18n.t('notification.importFailed'));
                 }
             };
@@ -4940,25 +5245,47 @@ class StockSimulator {
         const container = document.getElementById('auto-trade-stocks-container');
 
         if (this.autoTrade.configs.length === 0) {
-            container.innerHTML = `<p class="empty-tip">${I18n.t('auto.emptyTip')}</p>`;
+            container.innerHTML = `<p class="empty-tip">${escapeHtml(I18n.t('auto.emptyTip'))}</p>`;
             return;
         }
 
+        // P0-1 Fix: escape all user-controllable config fields; also store the index in a data attribute
+        // and use event delegation to avoid the global `game` reference and inline onclick handlers
         container.innerHTML = this.autoTrade.configs.map((config, index) => {
             const conditionText = this.getConditionText(config);
+            // P0-1 Fix: whitelist direction / priceType to prevent attribute injection
+            const dirClass = (config.direction === 'buy' || config.direction === 'sell') ? config.direction : 'buy';
+            const nameEsc = escapeHtml(config.name);
+            const codeEsc = escapeHtml(config.code);
+            const condEsc = escapeHtml(conditionText);
+            const qtyEsc = escapeHtml(String(config.quantity));
+            const dirText = escapeHtml(I18n.t(config.direction === 'buy' ? 'auto.directionBuy' : 'auto.directionSell'));
+            const priceTypeText = escapeHtml(I18n.t(config.priceType === 'market' ? 'auto.marketPriceLabel' : 'auto.limitPriceLabel'));
+            const qtyLabel = escapeHtml(I18n.t('auto.quantityLabel'));
+            const editText = escapeHtml(I18n.t('common.edit'));
+            const delText = escapeHtml(I18n.t('common.delete'));
             return `
-                <div class="auto-trade-stock-item ${config.direction}">
+                <div class="auto-trade-stock-item ${dirClass}" data-idx="${index}">
                     <div class="auto-trade-stock-info">
-                        <div class="stock-code">${config.name} (${config.code}) - ${I18n.t(config.direction === 'buy' ? 'auto.directionBuy' : 'auto.directionSell')}</div>
-                        <div class="stock-condition">${conditionText} | ${I18n.t('auto.quantityLabel')}: ${config.quantity} | ${I18n.t(config.priceType === 'market' ? 'auto.marketPriceLabel' : 'auto.limitPriceLabel')}</div>
+                        <div class="stock-code">${nameEsc} (${codeEsc}) - ${dirText}</div>
+                        <div class="stock-condition">${condEsc} | ${qtyLabel}: ${qtyEsc} | ${priceTypeText}</div>
                     </div>
                     <div class="auto-trade-stock-actions">
-                        <button class="btn-edit" onclick="game.editAutoTradeStock(${index})">${I18n.t('common.edit')}</button>
-                        <button class="btn-delete" onclick="game.removeAutoTradeStock(${index})">${I18n.t('common.delete')}</button>
+                        <button class="btn-edit" data-action="edit">${editText}</button>
+                        <button class="btn-delete" data-action="delete">${delText}</button>
                     </div>
                 </div>
             `;
         }).join('');
+
+        // P0-1 Fix: replace inline onclick with event delegation
+        container.querySelectorAll('.auto-trade-stock-item').forEach(item => {
+            const idx = parseInt(item.dataset.idx, 10);
+            const editBtn = item.querySelector('button[data-action="edit"]');
+            const deleteBtn = item.querySelector('button[data-action="delete"]');
+            if (editBtn) editBtn.addEventListener('click', (e) => { e.stopPropagation(); this.editAutoTradeStock(idx); });
+            if (deleteBtn) deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); this.removeAutoTradeStock(idx); });
+        });
     }
 
     // 获取条件描述文本（支持国际化）
@@ -4966,8 +5293,12 @@ class StockSimulator {
         const operatorMap = { above: 'auto.operatorAbove', below: 'auto.operatorBelow', equal: 'auto.operatorEqual' };
         const typeMap = { price: 'auto.conditionTextPrice', percentage: 'auto.conditionTextPercentage', profit: 'auto.conditionTextProfit', time: 'auto.conditionTypeTime' };
 
+        // P2-2 Fix: guard against unknown types/operators to avoid "undefined" rendering
         if (config.conditionType === 'time') {
             return I18n.t('auto.conditionTextTime');
+        }
+        if (!typeMap[config.conditionType] || !operatorMap[config.conditionOperator]) {
+            return I18n.t('auto.conditionUnknown', { value: String(config.conditionValue || 0) });
         }
 
         return `${I18n.t(typeMap[config.conditionType])}${I18n.t(operatorMap[config.conditionOperator])}${config.conditionValue}${config.conditionType === 'percentage' ? '%' : I18n.t('auto.unitYuan')}`;
@@ -5300,7 +5631,8 @@ class StockSimulator {
                 }
             }
 
-            this.currentSave.fund -= totalCost;
+            // P1-2 Fix: round money to cents
+            this.currentSave.fund = round2(this.currentSave.fund - totalCost);
             
             if (!this.currentSave.holdings[config.code]) {
                 this.currentSave.holdings[config.code] = {
@@ -5312,9 +5644,11 @@ class StockSimulator {
             }
 
             holding = this.currentSave.holdings[config.code];
-            const newTotalCost = holding.totalCost + amount;
+            // P0-2 Fix: include fee in the cost basis (match manual buy's behavior)
+            // P1-2 Fix: round to cents
+            const newTotalCost = round2(holding.totalCost + totalCost);
             holding.quantity += config.quantity;
-            holding.avgPrice = newTotalCost / holding.quantity;
+            holding.avgPrice = round2(newTotalCost / holding.quantity);
             holding.totalCost = newTotalCost;
 
             if (!this.currentSave.dayTrades[config.code]) {
@@ -5323,16 +5657,17 @@ class StockSimulator {
             this.currentSave.dayTrades[config.code].buy += config.quantity;
 
             this.addAutoTradeRecord(true, -totalCost, I18n.t('auto.buySuccess'), 0, config);
-            
+
             // 增加该股票的交易次数
             const stockTradeKey = config.code + '-' + config.direction;
             this.autoTrade.stockTradeCounts[stockTradeKey] = (this.autoTrade.stockTradeCounts[stockTradeKey] || 0) + 1;
-            
+
             this.currentSave.gameStats.tradeCount++;
             if (!(this.currentSave.gameStats.sectorsTraded instanceof Set)) {
                 this.currentSave.gameStats.sectorsTraded = new Set();
             }
-            const stock = StockPool.find(s => s.code === config.code);
+            // P0-2 Fix: use cached Map instead of O(n) find for every auto-trade tick
+            const stock = this._stockPoolByCode && this._stockPoolByCode.get(config.code);
             if (stock) this.currentSave.gameStats.sectorsTraded.add(stock.industry);
 
         } else {
@@ -5358,14 +5693,15 @@ class StockSimulator {
             }
 
             const totalIncome = amount - fee;
-            this.currentSave.fund += totalIncome;
+            // P1-2 Fix: round money to cents
+            this.currentSave.fund = round2(this.currentSave.fund + totalIncome);
 
-            pnl = (price - holding.avgPrice) * config.quantity;
-            
-            console.log(`卖出成功: ${config.name}, 卖出价格=${price.toFixed(2)}, 买入均价=${holding.avgPrice.toFixed(2)}, 盈亏=${pnl.toFixed(2)}, 剩余持仓=${holding.quantity - config.quantity}`);
-            
+            // P1-5 Fix: include sell fee in PnL (consistent with manual sell)
+            pnl = round2((price - holding.avgPrice) * config.quantity - fee);
+
             holding.quantity -= config.quantity;
-            holding.totalCost = holding.avgPrice * holding.quantity;
+            // P1-2 Fix: round remaining cost basis to cents
+            holding.totalCost = round2(holding.avgPrice * holding.quantity);
 
             if (holding.quantity === 0) {
                 delete this.currentSave.holdings[config.code];
@@ -5498,23 +5834,26 @@ class StockSimulator {
         const recordsList = document.getElementById('auto-trade-records-list');
         
         if (this.autoTrade.records.length === 0) {
-            recordsList.innerHTML = `<p style="text-align:center;color:var(--text-secondary);padding:20px;">${I18n.t('auto.noRecords')}</p>`;
+            recordsList.innerHTML = `<p style="text-align:center;color:var(--text-secondary);padding:20px;">${escapeHtml(I18n.t('auto.noRecords'))}</p>`;
         } else {
             recordsList.innerHTML = this.autoTrade.records.map(record => {
                 const date = new Date(record.time);
                 const pnlClass = record.pnl >= 0 ? 'up' : 'down';
                 const pnlSymbol = record.pnl >= 0 ? '+' : '';
+                // P0-1 Fix: whitelist the class suffix and escape all fields
+                const successClass = record.success ? 'success' : 'failed';
 
-                let detailsHtml = `<div class="time">${date.toLocaleString(I18n.getCurrentLanguage())}</div>`;
-                detailsHtml += `<div class="details">${record.message}</div>`;
+                // P0-1 Fix: escape every field before HTML interpolation
+                let detailsHtml = `<div class="time">${escapeHtml(date.toLocaleString(I18n.getCurrentLanguage()))}</div>`;
+                detailsHtml += `<div class="details">${escapeHtml(String(record.message || ''))}</div>`;
 
                 if (record.code) {
-                    detailsHtml += `<div class="stock-info">${record.name} (${record.code})</div>`;
+                    detailsHtml += `<div class="stock-info">${escapeHtml(String(record.name || ''))} (${escapeHtml(String(record.code || ''))})</div>`;
                 }
 
                 if (record.direction === 'sell' && record.buyPrice > 0) {
                     detailsHtml += `<div class="trade-details">
-                        ${I18n.t('auto.buyPriceLabel')}: ¥${record.buyPrice.toFixed(2)} | ${I18n.t('auto.sellPriceLabel')}: ¥${record.sellPrice.toFixed(2)} | ${I18n.t('auto.pnlLabel')}: ${pnlSymbol}${record.pnlPercent}%
+                        ${escapeHtml(I18n.t('auto.buyPriceLabel'))}: ¥${escapeHtml(Number(record.buyPrice).toFixed(2))} | ${escapeHtml(I18n.t('auto.sellPriceLabel'))}: ¥${escapeHtml(Number(record.sellPrice).toFixed(2))} | ${escapeHtml(I18n.t('auto.pnlLabel'))}: ${pnlSymbol}${escapeHtml(String(record.pnlPercent || 0))}%
                     </div>`;
                 }
 
@@ -5524,17 +5863,20 @@ class StockSimulator {
                         conditionOperator: record.conditionType === 'profit' ? 'above' : 'equal',
                         conditionValue: record.conditionValue
                     });
-                    detailsHtml += `<div class="condition-info">${I18n.t('auto.conditionTriggerLabel')}: ${conditionText}</div>`;
+                    detailsHtml += `<div class="condition-info">${escapeHtml(I18n.t('auto.conditionTriggerLabel'))}: ${escapeHtml(conditionText)}</div>`;
                 }
 
+                const amountText = record.pnl !== 0 ? `${pnlSymbol}¥${escapeHtml(this.formatMoney(record.pnl))}` : '--';
+                const statusText = record.success ? escapeHtml(I18n.t('common.statusSuccess')) : escapeHtml(I18n.t('common.statusFailed'));
+
                 return `
-                    <div class="record-item ${record.success ? 'success' : 'failed'}">
+                    <div class="record-item ${successClass}">
                         <div class="record-info">
                             ${detailsHtml}
                         </div>
                         <div class="record-result">
-                            <div class="amount ${record.pnl >= 0 ? 'up' : 'down'}">${record.pnl !== 0 ? `${pnlSymbol}¥${this.formatMoney(record.pnl)}` : '--'}</div>
-                            <div class="status">${record.success ? I18n.t('common.statusSuccess') : I18n.t('common.statusFailed')}</div>
+                            <div class="amount ${pnlClass}">${amountText}</div>
+                            <div class="status">${statusText}</div>
                         </div>
                     </div>
                 `;
@@ -5542,94 +5884,8 @@ class StockSimulator {
         }
     }
 
-    // 验证并测试影视飓风股票
-    verifyYingShiJuFeng() {
-        // 检查StockPool中是否存在影视飓风
-        const stock = StockPool.find(s => s.code === '999999' && s.name === '影视飓风');
-        
-        if (!stock) {
-            console.error('影视飓风股票未找到');
-            return false;
-        }
-        
-        // 模拟价格波动测试
-        const totalTests = 1000;
-        let upCount = 0;
-        
-        for (let i = 0; i < totalTests; i++) {
-            let change;
-            // 为影视飓风设置更高的上涨概率
-            if (stock.code === '999999' && stock.name === '影视飓风') {
-                // 上涨概率70%，下跌概率30%
-                if (Math.random() < 0.7) {
-                    // 上涨：0.5% ~ 3%
-                    change = (Math.random() * 0.025 + 0.005);
-                    upCount++;
-                } else {
-                    // 下跌：-0.5% ~ -2%
-                    change = (Math.random() * 0.015 - 0.02);
-                }
-            }
-        }
-        
-        const upProbability = (upCount / totalTests) * 100;
-        
-        // 生成报告
-        const report = `
-=== 影视飓风股票添加成功报告 ===
-股票代码: ${stock.code}
-股票名称: ${stock.name}
-所属行业: ${stock.industry}
-
-上涨概率测试结果:
-测试次数: ${totalTests}次
-上涨次数: ${upCount}次
-上涨概率: ${upProbability.toFixed(2)}%
-
-预期上涨概率: 70%
-实际上涨概率: ${upProbability.toFixed(2)}%
-
-结论: ${upProbability >= 65 && upProbability <= 75 ? '上涨概率设置成功' : '上涨概率设置可能存在问题'}
-`;
-        
-        console.log(report);
-        this.showNotification(I18n.t('auto.specialStockAdded'), 'success');
-        
-        // 显示详细报告
-        alert(report);
-        
-        return true;
-    }
-
-    // 修复异常持仓数据
-    fixAbnormalHoldings() {
-        if (!this.currentSave) {
-            this.showNotification(I18n.t('auto.fixFailedNoSave'), 'error');
-            return false;
-        }
-
-        let fixed = false;
-        Object.entries(this.currentSave.holdings).forEach(([code, holding]) => {
-            const data = this.stockData.get(code);
-            if (data && holding.avgPrice > data.price * 10) { // 成本价异常高
-                // 重置成本价为当前市场价格
-                holding.avgPrice = data.price;
-                holding.totalCost = data.price * holding.quantity;
-                fixed = true;
-                console.log(`修复了${code}的异常持仓数据，成本价重置为${data.price}`);
-            }
-        });
-
-        if (fixed) {
-            this.saveUsers();
-            this.updatePortfolio();
-            this.showNotification(I18n.t('notification.fixApplied'));
-        } else {
-            this.showNotification(I18n.t('notification.fixNotFound'));
-        }
-
-        return fixed;
-    }
+    // P2-5: verifyYingShiJuFeng and fixAbnormalHoldings removed (dead code; the latter silently
+    // rewrote holding.avgPrice with the current market price, faking P&L).
 }
 
 // 启动应用

@@ -10,6 +10,7 @@
 }
 
 :root {
+    color-scheme: dark; /* 让原生控件（数字步进箭头、下拉箭头等）按深色渲染，融入暗色主题 */
     --bg-primary: #0d1117;
     --bg-secondary: #161b22;
     --bg-tertiary: #21262d;
@@ -43,6 +44,7 @@ body {
 
 /* 主题样式 - 浅色 */
 body.light-theme {
+    color-scheme: light; /* 浅色主题下原生控件按浅色渲染 */
     --bg-primary: #f5f5f5;
     --bg-secondary: #ffffff;
     --bg-tertiary: #f0f0f0;
@@ -1173,6 +1175,11 @@ body.festival-theme {
     background: var(--primary-color);
     color: white;
     border-color: var(--primary-color);
+}
+
+.chart-btn svg {
+    display: block;
+    pointer-events: none;
 }
 
 .chart-hint {
@@ -2914,6 +2921,91 @@ select:focus {
 
 .condition-input-group input {
     flex: 1;
+}
+
+/* ==================== 数字输入框自定义步进按钮 ====================
+   隐藏浏览器原生上下箭头（在深色/节日主题下呈白色块，非常突兀），
+   改为 JS 统一注入的主题化步进按钮：箭头颜色跟随 --text-secondary，
+   悬停/按下跟随 --primary-color，深色/浅色/节日主题均自动适配 */
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+}
+
+.num-stepper {
+    position: relative;
+    display: flex;
+    width: 100%;
+    min-width: 0;
+}
+
+.num-stepper input {
+    width: 100%;
+    padding-right: 34px;
+}
+
+/* flex 布局容器内的包装器占满剩余空间 */
+.condition-input-group .num-stepper,
+.time-input-row .num-stepper {
+    flex: 1;
+}
+
+/* 固定宽度的输入框：包装器继承其宽度，避免被撑满 */
+.fee-inputs .num-stepper {
+    width: 120px;
+    flex: 0 0 auto;
+}
+
+/* 时间输入框文字居中，左右对称留出按钮空间以保持视觉居中 */
+.num-stepper .time-input {
+    padding-left: 34px;
+}
+
+.num-stepper-btns {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    bottom: 5px;
+    width: 22px;
+    display: flex;
+    flex-direction: column;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.num-stepper-btns button {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.num-stepper-btns button:hover {
+    background: var(--bg-secondary);
+    color: var(--primary-color);
+}
+
+.num-stepper-btns button:active {
+    background: var(--primary-color);
+    color: #fff;
+}
+
+/* 输入框禁用时隐藏步进按钮 */
+.num-stepper input:disabled + .num-stepper-btns {
+    display: none;
 }
 
 .form-hint {

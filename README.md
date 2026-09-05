@@ -8,7 +8,10 @@
 
 一个纯娱乐、零压力的 A 股模拟炒股平台。所有数据均在浏览器本地生成与存储，不连接任何真实行情接口，用户可在无资金风险的环境中学习股票交易规则、体验市场波动并测试自己的交易策略。
 
-> 版本：v2.4.0
+> 版本：v2.5.0
+> 更新时间：2026-9
+
+> 🛡️ **v2.5.0 安全与稳定性更新**：本版本修复了 13 项安全/正确性缺陷，详见[更新日志](#更新日志v250)。所有用户密码已从 8 位弱哈希升级至 PBKDF2-SHA-256（10 万轮 + 随机盐），旧用户首次登录时自动平滑迁移。
 > 开发者：莫客星图（Bilibili）
 
 ---
@@ -50,6 +53,8 @@
 - [贡献规范](#贡献规范)
 - [许可证](#许可证)
 - [未来计划](#未来计划)
+- [贡献规范](#贡献规范)
+- [更新日志（v2.5.0）](#更新日志v250)
 - [Star历史](#Star历史)
 
 ---
@@ -103,8 +108,9 @@
 | 逻辑 | 原生 JavaScript（ES6+，Class、Map、Set、Promise） |
 | 图表 | Canvas 2D API（自实现 K 线与成交量绘制） |
 | 数据存储 | LocalStorage（本地存储） |
-| 数据加密 | XOR + Base64 自实现加密、自实现哈希 |
+| 数据加密（v2.5.0）| XOR + Base64 自实现加密；**密码使用 PBKDF2-SHA-256（10 万轮 + 随机盐）** |
 | 依赖 | 无任何第三方库，零依赖 |
+| 测试（v2.5.0）| `node:test` + `node:vm`，30 个测试用例覆盖全部安全/正确性修复 |
 
 ---
 
@@ -127,6 +133,8 @@ Stock simulator/
 ├── images/                 # 项目图片资源
 │   ├── cover.jpg           # 中文版封面图
 │   └── cover-en.png        # 英文版封面图
+└── tests/                    # 测试套件（v2.5.0 新增）
+│   └── run.mjs               # 安全/正确性测试，30 个用例覆盖所有 P0/P1/P2 修复
 └── LICENSE                 # MIT 开源许可证
 ```
 
@@ -526,13 +534,20 @@ chartState = {
 
 ### 数据安全与备份
 
-**本地加密存储**：所有用户数据写入 LocalStorage 前经过 `Crypto.encrypt()` 处理（XOR 加密 + Base64 编码），密钥为 `stock-simulator-2024`。密码不以明文存储，注册时通过 `Crypto.hash()` 生成 8 位十六进制哈希保存，登录时比对哈希值。
+**本地加密存储**：所有用户数据写入 LocalStorage 前经过 `Crypto.encrypt()` 处理（XOR 加密 + Base64 编码），密钥为 `stock-simulator-2024`。
 
-> 注意：该加密方案为简易实现，仅防止肉眼直接查看，不提供真正的安全保证。请勿在真实场景中复用。
+> ⚠️ **重要安全声明（v2.5.0 起明确）**：本项目是**纯前端**应用，所有加密和哈希都在**用户自己的浏览器**中运行。这意味着任何能在浏览器中执行 JavaScript 的人（即用户自己，包括通过 DevTools 控制台）都能读写 LocalStorage、调用 `Crypto.decrypt` 解密所有数据。`Crypto.encrypt/decrypt` 的目的是**防止无关用户偶然看到 LocalStorage 内容**（例如家庭共享电脑、截图、备份文件），**它不是对抗性安全机制**。请勿在任何真正敏感的场景下使用本应用的密码。
+
+**密码哈希（v2.5.0 升级）**：自 v2.5.0 起，新用户密码使用 **PBKDF2-SHA-256** 派生，**10 万轮迭代 + 每用户随机 16 字节盐**（存储格式：`pbkdf2-sha256-100k$<saltHex>$<derivedHex>`）。v2.5.0 之前注册的用户使用旧的 32 位弱哈希；首次登录成功后，密码哈希将**自动升级**到 PBKDF2 格式，无需任何用户操作。
 
 **存档导出**：在个人主页点击「导出存档」可将当前用户全部数据加密后下载为 `.txt` 文件，文件名格式为 `stock_simulator_backup_{用户名}_{时间戳}.txt`。
 
-**存档导入**：点击「导入存档」选择 `.txt` 文件，解密后解析为用户数据并覆盖同名用户，支持跨设备迁移存档。
+**存档导入（v2.5.0 加固）**：点击「导入存档」选择 `.txt` 文件。导入流程现在包含：
+- **5 MB 文件大小上限**（防止 DoS）
+- **用户数据 schema 校验**（拒绝畸形 JSON、错误字段类型）
+- **每条存档的字段白名单**（存档名限制为中文/字母/数字/常用符号，限制 1-20 字符；`tradeUnit` 仅接受 `{1, 100}`；`buyFee`/`sellFee` 限制在 `[0, 0.01]`）
+- **同名用户冲突对话框**（可选择「覆盖」「合并」或「取消」；合并会保留本地偏好）
+- **所有用户可控字符串在渲染前进行 HTML 转义**，防止通过恶意存档名注入脚本
 
 **右键菜单**：全局禁用浏览器右键菜单，防止用户复制页面内容。
 
@@ -785,6 +800,34 @@ chartState = {
 4. 为新增的 UI 文本添加 `data-i18n` 属性，并在两个语言资源文件中补充对应键值
 5. 动态生成的文本使用 `I18n.t('key')` 替代硬编码字符串
 
+### 测试（v2.5.0 新增）
+
+`tests/run.mjs` 是本次安全审计对应的回归测试套件，使用 **Node 内置 `node:test` + `node:vm`** 实现，零外部依赖。
+
+**运行方式**：
+
+```bash
+# 在项目根目录执行
+node tests/run.mjs
+```
+
+**测试覆盖范围**：
+
+- 8 个 `crypto.js` 单元测试（PBKDF2 加解密、随机盐、UUID、加密往返）
+- 22 个 `game.js` 集成/静态分析测试（XSS 转义、输入校验、资金精度、熔断、calculateStats、auto-trade 成本、P0-P2 全部修复）
+
+**测试运行后预期输出**：
+
+```
+✔ 30 tests passed, 0 failed
+```
+
+**工作原理**：
+
+测试套件使用 `vm.createContext` 把源文件加载到隔离的 JavaScript 沙箱中，附带一个最小化的 DOM 桩（`FakeElement`、`fakeDocument`、`fakeLocalStorage`），无需 jsdom 之类的依赖。`vm.runInContext` 不会把 `const`/`let`/`class` 顶层声明暴露到上下文，因此 `loadScript()` 会做一次简单的 `const X =` → `var X =` 重写，使测试可以访问 `ctx.Crypto`、`ctx.LimitManager`、`ctx.StockSimulator` 等。
+
+静态分析测试用 `readFileSync` 直接读取 `game.js` 源码，剥离注释行后检查关键字符串（如 `holding.totalCost + totalCost` 是否在自动交易和手动交易两处都出现）。
+
 ---
 
 ## 未来计划
@@ -805,6 +848,7 @@ chartState = {
 如有问题或建议，请联系开发者：
 
 - Bilibili：莫客星图
+- YouTube: @moke_xingtu
 
 ---
 
@@ -844,8 +888,52 @@ Copyright (c) 2026 MOX
 
 ---
 
-**版本信息**：v2.4.0
+**版本信息**：v2.5.0
 **开发人员**：莫客星图
+
+---
+
+## 更新日志（v2.5.0）
+
+> 🛡️ **v2.5.0 安全与稳定性更新** — 本次更新是对整个项目的一次完整安全审计后的修复版本，修复了 **2 个 P0 严重缺陷、4 个 P1 高危缺陷、7 个 P2 中等缺陷**。所有修复均带有自动化测试（`tests/run.mjs`，共 30 个用例），可通过 `node tests/run.mjs` 复跑验证。
+
+### 🔴 P0 严重缺陷修复
+
+| 编号 | 模块 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| **P0-1** | 存档渲染 + 导入 | 11 处 `innerHTML` 拼接未转义用户可控字段（存档名、股票名、成就名、记录等），通过恶意 `.txt` 导入文件可注入任意 JavaScript（XSS） | 新增 `escapeHtml()` 工具函数，所有渲染点统一转义；`importSave` 增加 5 MB 文件大小限制、`sanitizeUserData` / `sanitizeSaveData` 严格 schema 校验 |
+| **P0-2** | 自动交易 | 自动买入分支 `holding.totalCost + amount` 未含手续费，与手动买入口径不一致，导致 `avgPrice` 系统性低估、止盈/止盈误判 | 改为 `holding.totalCost + totalCost`（与手动买入一致）；同时把 `O(n) StockPool.find` 替换为 `O(1) Map` 缓存 |
+
+### 🟠 P1 高危缺陷修复
+
+| 编号 | 模块 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| **P1-1** | 用户统计 | `calculateStats()` 引用未声明的 `currentSave` 标识符，会在 `currentUser` 为 `null` 时抛出未捕获 `ReferenceError` | 改为 `this.currentSave`，并在缺失时返回零值（不抛错） |
+| **P1-2** | 资金计算 | 浮点 `number` 直接用于资金，IEEE754 误差在高频自动交易下累积，导致 `fund`、`avgPrice`、`totalCost` 漂移 | 新增 `round2()` 工具，所有资金写路径（手动/自动买入、卖出、`updateTradeEstimate`）按分（2 位小数）归一化 |
+| **P1-3** | 存档加载 | `loadSave` 未对 `settings.tradeUnit`/`buyFee`/`sellFee` 做白名单/范围校验，畸形存档会导致 `Math.floor(fund/price/0)` = `NaN` | 加载时强制 `tradeUnit ∈ {1, 100}`，费用限制在 `[0, 0.01]`；`importSave` 的 `sanitizeSaveData` 同样执行 |
+| **P1-4** | 认证与日志 | 登录/注册方法向 `console.log` 输出密码、用户名、密码哈希；密码仅以 32 位 `hash & hash` 单轮无盐存储，可被彩虹表秒破 | 删除全部敏感日志；密码哈希升级为 **PBKDF2-SHA-256（10 万轮 + 每用户随机盐）**，旧用户首次登录时透明迁移；保留旧哈希校验以保证兼容性 |
+| **P1-5** | 盈亏口径 | 卖出 `pnl = (price - avgPrice) * quantity` **未扣手续费**，导致「首盈利」「连盈」「止盈」成就在微利小单下被误判 | 卖出 `pnl = (price - avgPrice) * quantity - fee`（手动/自动交易统一） |
+
+### 🟡 P2 中等缺陷修复
+
+| 编号 | 模块 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| **P2-1** | 熔断 | 阈值 0.20 与涨跌幅 ±0.10 范围冲突，熔断永远不触发 | 改为按 tick 移动幅度判定（5%），修复 `checkCircuitBreaker` 的语义 |
+| **P2-2** | 国际化 | `getConditionText` 对未知 `conditionType`/`conditionOperator` 返回 "undefined" | 增加类型白名单回退，输出「条件：未知」占位文本 |
+| **P2-3** | 交易输入 | `parseInt('100abc')` 静默截断为 `100`，可造成非预期交易 | `executeTrade` 改用 `Number()` + `Number.isInteger` + 正整数 + 区间上限 + `tradeUnit` 倍数校验 |
+| **P2-4** | 导入 | 同名用户导入会**静默覆盖**全部存档，无任何确认 | 增加「替换 / 合并 / 取消」三选项对话框；合并路径保留本地偏好 |
+| **P2-5** | 死代码 | `fixAbnormalHoldings()` 静默将持仓成本重写为市价，会**伪造盈亏**；`verifyYingShiJuFeng()` 死代码 | 两个函数均已删除 |
+| **P2-6** | 时间系统 | `gameTime.tickPerMinute` 字段已声明但从未读取，与 `updateGameTime` 实际每 tick 推 1 分钟不一致 | 字段重命名为 `minutesPerTick`（默认 1），`updateGameTime` 读取该字段；移除死字段 |
+| **P2-7** | 交易页 | `renderAutoTradeStockList` 使用内联 `onclick="game.xxx()"` 全局函数 + 未转义 `config.name` 注入 | 改用事件委托 + `data-idx` 属性；全部用户字段转义 |
+
+
+### 🔒 用户数据迁移说明
+
+- **v2.4.x 用户的旧密码哈希在 v2.5.0 首次成功登录后自动升级**为 PBKDF2 格式。无需任何手动操作。
+- 升级前请确保浏览器支持 Web Crypto API（`crypto.subtle.deriveBits`），所有现代浏览器（Chrome 66+、Firefox 57+、Safari 10.1+、Edge 79+）均支持。
+- 若浏览器不支持 Web Crypto，旧密码哈希将**保留**（不会升级），用户仍可正常登录。
+
+---
 
 ## Star历史
 

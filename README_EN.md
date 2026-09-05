@@ -8,7 +8,10 @@
 
 A pure-entertainment, zero-stress Chinese A-share stock trading simulator platform. All data is generated and stored locally inside your browser without connecting to real market APIs. Users can learn trading rules, experience market fluctuations, and test strategies in a risk-free environment.
 
-> Version: v2.4.0
+> Version: v2.5.0
+> Updated: 2026-9
+
+> 🛡️ **v2.5.0 Security & Stability Update**: This release fixes 13 security/correctness bugs. All user passwords have been upgraded from 8-character weak hashes to PBKDF2-SHA-256 (100k iterations + random per-user salt). Legacy users are transparently migrated on next successful login. See the [Changelog](#changelog-v250) for details.
 > Developer: Moke Xintu (Bilibili)
 
 ---
@@ -50,6 +53,7 @@ A pure-entertainment, zero-stress Chinese A-share stock trading simulator platfo
 -   [Contributing](#contributing)
 -   [License](#license)
 -   [Future Roadmap](#future-roadmap)
+-   [Changelog (v2.5.0)](#changelog-v250)
 -   [Star History](#star-history)
 
 ---
@@ -103,7 +107,7 @@ Positioned as a "pure entertainment" tool, it involves no real capital. All mark
 | Core Logic     | Vanilla JavaScript (ES6+, Classes, Maps, Sets, Promises)   |
 | Charts         | Canvas 2D API (Custom implementation for Candlestick/Volume)|
 | Data Storage   | LocalStorage                                               |
-| Encryption     | Custom XOR + Base64 encryption & custom hashing            |
+| Encryption (v2.5.0)| Custom XOR + Base64 obfuscation; passwords use **PBKDF2-SHA-256 (100k + salt)** |
 | Dependencies   | None (Zero Third-Party Libraries)                          |
 
 ---
@@ -127,6 +131,8 @@ Stock simulator/
 ├── images/                 # Project image assets
 │   ├── cover.jpg           # Chinese version cover image
 │   └── cover-en.png        # English version cover image
+├── tests/                  # Test suite (added in v2.5.0)
+│   └── run.mjs             # Security & correctness tests, 30 cases covering all P0/P1/P2 fixes
 └── LICENSE                 # MIT open-source license
 ```
 
@@ -437,8 +443,16 @@ A 9-step interactive guided overlay explaining market features, order execution,
 
 ### Data Security & Backup
 
--   **Local Storage**: Data encrypted using custom XOR + Base64 encoding. Passwords stored using 8-character hexadecimal hashes.
--   **Export/Import**: Export game data into an encrypted `.txt` file (`stock_simulator_backup_{username}_{timestamp}.txt`) for backup or cross-device transfer.
+> ⚠️ **Important Security Notice (clarified in v2.5.0)**: This is a **pure front-end** application. All encryption and hashing run **in the user's own browser**. Anyone who can run JavaScript in their browser (i.e. the user themselves, including via DevTools) can read and write LocalStorage, call `Crypto.decrypt` to decrypt all data, etc. The purpose of `Crypto.encrypt/decrypt` is to **prevent casual snooping** (e.g. family-shared computer, screenshot, backup file), **not to be an adversarial security mechanism**. Do not use this app's password for any truly sensitive purpose.
+
+-   **Local Storage**: Data encrypted using custom XOR + Base64 encoding before being written to LocalStorage.
+-   **Password Hashing (upgraded in v2.5.0)**: New user passwords are now derived via **PBKDF2-SHA-256** with **100,000 iterations** and a **per-user random 16-byte salt** (storage format: `pbkdf2-sha256-100k$<saltHex>$<derivedHex>`). Pre-v2.5.0 users still have the old 32-bit weak hash; on their next successful login the hash is **automatically upgraded** to PBKDF2 without any user action.
+-   **Export/Import (hardened in v2.5.0)**: Clicking Import now performs:
+    - **5 MB file size cap** (DoS prevention)
+    - **Strict schema validation** of the user data (rejects malformed JSON or wrong field types)
+    - **Per-save field whitelisting** (save name is restricted to CJK / Latin / digits / common punctuation, 1-20 chars; `tradeUnit` only accepts `{1, 100}`; `buyFee`/`sellFee` capped to `[0, 0.01]`)
+    - **Same-username conflict dialog** (Replace / Merge / Cancel; Merge preserves local preferences)
+    - **All user-controlled strings are HTML-escaped** before rendering, preventing XSS via malicious save names.
 
 ## Trading Rules
 
@@ -680,8 +694,8 @@ User action → Event listener → StockSimulator method
 
 If you have questions or suggestions, please contact the developer:
 
--   Bilibili: Moke Xintu
-
+-   Bilibili: 莫客星图
+-   YouTube: @moke_xingtu
 ---
 
 ## Contributing
@@ -710,6 +724,36 @@ Issues and Pull Requests are welcome! Please follow these guidelines:
 -   HTML: Semantic tags, all translatable text must have `data-i18n` attributes
 -   Comments: Add Chinese comments for core logic; functions should document parameters and return values
 
+### Tests (added in v2.5.0)
+
+`tests/run.mjs` is the regression test suite corresponding to this security audit, built on **Node's built-in `node:test` + `node:vm`** with **zero external dependencies**.
+
+**How to run**:
+
+```bash
+# From the project root
+node tests/run.mjs
+```
+
+**Coverage**:
+
+- 8 `crypto.js` unit tests (PBKDF2 roundtrip, random salt, UUID, encryption roundtrip)
+- 22 `game.js` integration / static analysis tests (XSS escaping, input validation, money precision, circuit breaker, calculateStats, auto-trade cost basis, all P0-P2 fixes)
+
+**Expected output**:
+
+```
+✔ 30 tests passed, 0 failed
+```
+
+**How it works**:
+
+The test suite uses `vm.createContext` to load source files into an isolated JavaScript sandbox with a minimal DOM stub (`FakeElement`, `fakeDocument`, `fakeLocalStorage`), so no jsdom-like dependency is required. Since `vm.runInContext` does not expose top-level `const` / `let` / `class` declarations to the context object, `loadScript()` performs a simple `const X =` → `var X =` rewrite so tests can reach `ctx.Crypto`, `ctx.LimitManager`, `ctx.StockSimulator`, etc.
+
+Static-analysis tests read `game.js` directly with `readFileSync`, strip comment lines, and check for key strings (e.g. that `holding.totalCost + totalCost` appears in both auto-trade and manual buy paths).
+
+When adding new features, please extend `tests/run.mjs` with a corresponding test case.
+
 ---
 
 ## License
@@ -720,8 +764,51 @@ Copyright (c) 2026 MOX
 
 ---
 
-**Version**: v2.4.0
+**Version**: v2.5.0
 **Developer**: Moke Xintu (Bilibili)
+
+---
+
+## Changelog (v2.5.0)
+
+> 🛡️ **v2.5.0 Security & Stability Update** — This release is the result of a complete security audit of the project. It fixes **2 P0 critical bugs, 4 P1 high-severity bugs, and 7 P2 medium bugs**. All fixes come with an automated test suite (`tests/run.mjs`, 30 cases total) that can be re-run with `node tests/run.mjs`.
+
+### 🔴 P0 Critical Fixes
+
+| ID | Module | Problem | Fix |
+| --- | --- | --- | --- |
+| **P0-1** | Save rendering + import | 11 `innerHTML` sinks concatenate user-controlled fields (save name, stock name, achievement name, records, etc.) without escaping. A malicious `.txt` import file can inject arbitrary JavaScript (XSS) | Added `escapeHtml()` helper applied to all rendering points; `importSave` now caps file size at 5 MB and runs `sanitizeUserData` / `sanitizeSaveData` for strict schema validation |
+| **P0-2** | Auto-trade | Auto-trade buy branch computed `holding.totalCost + amount` (without fee), inconsistent with manual buy, leading to systematic `avgPrice` under-estimation and stop-profit misfires | Changed to `holding.totalCost + totalCost` (consistent with manual buy); replaced O(n) `StockPool.find` with an O(1) Map cache |
+
+### 🟠 P1 High-Severity Fixes
+
+| ID | Module | Problem | Fix |
+| --- | --- | --- | --- |
+| **P1-1** | User stats | `calculateStats()` referenced an undeclared `currentSave` identifier, throwing an uncaught `ReferenceError` when `currentUser` was `null` | Use `this.currentSave`, return zero values when absent (no throw) |
+| **P1-2** | Money math | Native `number` (IEEE754) is used directly for money. Error accumulates under high-frequency auto-trading, drifting `fund`, `avgPrice`, `totalCost` | Added `round2()` helper; all money write paths (manual/auto buy, sell, `updateTradeEstimate`) now normalize to cents (2 decimals) |
+| **P1-3** | Save loading | `loadSave` did not validate `settings.tradeUnit` / `buyFee` / `sellFee`. A malformed save could cause `Math.floor(fund/price/0)` = `NaN` | Force `tradeUnit ∈ {1, 100}` on load; cap fees to `[0, 0.01]`. `sanitizeSaveData` in `importSave` applies the same rules |
+| **P1-4** | Auth & logging | `login()` and `register()` logged password, username, and password hashes to `console.log`. Passwords were stored as 32-bit single-pass unsalted hashes (`hash & hash`), trivially defeated by rainbow tables | Removed all sensitive logs; password hashing upgraded to **PBKDF2-SHA-256 (100k + per-user random salt)**; legacy hashes still verified for backward compatibility |
+| **P1-5** | PnL consistency | Sell `pnl = (price - avgPrice) * quantity` **did not subtract the sell fee**, causing "first profit" / "consecutive wins" / stop-profit achievements to misfire on small-profit trades | Sell `pnl = (price - avgPrice) * quantity - fee` (unified for manual and auto-trade) |
+
+### 🟡 P2 Medium Fixes
+
+| ID | Module | Problem | Fix |
+| --- | --- | --- | --- |
+| **P2-1** | Circuit breaker | Threshold 0.20 conflicted with the ±0.10 daily price limit, so the breaker was unreachable | Switched to per-tick move (5%); clarified `checkCircuitBreaker` semantics |
+| **P2-2** | i18n | `getConditionText` returned literal "undefined" for unknown `conditionType` / `conditionOperator` | Added type whitelist with a fallback label |
+| **P2-3** | Trade input | `parseInt('100abc')` silently truncates to `100`; `1e9` is silently accepted; `3.7` becomes `3` | `executeTrade` now uses `Number()` + `Number.isInteger` + positive + range + `tradeUnit` multiple checks |
+| **P2-4** | Import | Importing a save for an existing username **silently overwrote** all user data with no confirmation | Added Replace / Merge / Cancel dialog; Merge preserves local preferences |
+| **P2-5** | Dead code | `fixAbnormalHoldings()` silently overwrote `holding.avgPrice`/`totalCost` with the market price — effectively **faked** P&L. `verifyYingShiJuFeng()` was dead code that called `alert()` | Both functions removed |
+| **P2-6** | Time system | `gameTime.tickPerMinute` was declared but never read; actual time advance was hardcoded to 1 minute per tick | Renamed field to `minutesPerTick` (default 1); `updateGameTime` now reads it; dead field removed |
+| **P2-7** | Trade page | `renderAutoTradeStockList` used inline `onclick="game.xxx()"` referencing a global function and unescaped `config.name` (XSS) | Switched to event delegation with `data-idx`; all user fields escaped |
+
+### 🔒 User Data Migration
+
+- **Pre-v2.4.x users' legacy password hashes are automatically upgraded to PBKDF2** on their first successful login in v2.5.0. No manual action required.
+- The upgrade requires Web Crypto API support (`crypto.subtle.deriveBits`). All modern browsers (Chrome 66+, Firefox 57+, Safari 10.1+, Edge 79+) qualify.
+- If Web Crypto is unavailable, the legacy hash is **preserved** (no upgrade) and the user can still log in normally.
+
+---
 
 ## Star History
 

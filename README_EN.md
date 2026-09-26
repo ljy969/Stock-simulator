@@ -11,11 +11,6 @@ A pure-entertainment, zero-stress Chinese A-share stock trading simulator platfo
 > Version: v2.6.0
 > Updated: 2026-9
 
-> 🛡️ **v2.6.0 Stability & Robustness Update**: A second round of fixes on top of the v2.5.0 security audit. It fixes **1 P0, 5 P1, and 4 P2 defects (10 in total)** and adds 10 i18n keys (7 previously missing, 3 new). Every fix ships with an automated regression script `verify_fixes.js` (27 cases) that can be re-run with `node verify_fixes.js`. See the [Changelog](#changelog-v260) for details.
->
-> 🛡️ **v2.5.0 Security Update (historical)**: This release fixed 14 security/correctness bugs. All user passwords have been upgraded from 8-character weak hashes to PBKDF2-SHA-256 (100k iterations + random per-user salt). Legacy users are transparently migrated on next successful login. See the [Changelog](#changelog-v250) for details.
-> Developer: Moke Xintu (Bilibili)
-
 ---
 <div align="center">
   <a href="https://www.bilibili.com/video/BV1sWNwzVEek/" target="_blank">
@@ -56,8 +51,6 @@ A pure-entertainment, zero-stress Chinese A-share stock trading simulator platfo
 - [Contact & Credits](#contact--credits)
 - [Contributing](#contributing)
 - [License](#license)
-- [Changelog (v2.6.0)](#changelog-v260)
-- [Changelog (v2.5.0)](#changelog-v250)
 - [Star History](#star-history)
 
 ---

@@ -40,6 +40,9 @@ const ZH_CN = {
     'auth.regError.passwordLength': '密码需6-20位',
     'auth.regError.passwordMismatch': '两次密码不一致',
     'auth.regError.userExists': '用户名已存在',
+    // P1-7/P1-10 Fix: previously missing keys used by register()
+    'auth.regError.generic': '注册失败，请稍后重试',
+    'auth.regError.usernameInvalidChars': '用户名只能包含中文、字母、数字、下划线和连字符',
     'auth.regSuccess': '注册成功，请登录',
 
     // ==================== 存档选择页 ====================
@@ -125,9 +128,13 @@ const ZH_CN = {
     'trade.estimateAmount': '预估金额: ',
     'trade.buySuccess': '买入成功！',
     'trade.sellSuccess': '卖出成功！',
+    // P1-10 Fix: shown when persistence failed and the trade was rolled back
+    'trade.saveFailedRollback': '保存失败，交易未生效，已回滚，请检查存储空间后重试',
     'trade.incompleteInfo': '请填写完整的交易信息',
     'trade.notInTradingTime': '当前不在交易时间内，无法进行交易',
     'trade.invalidPrice': '价格必须大于0',
+    'trade.invalidQuantity': '请输入有效的整数数量',
+    'trade.invalidQuantityUnit': '数量必须是 {unit} 的整数倍',
     'trade.circuitBreakerActive': '该股票处于熔断状态，暂时无法交易',
     'trade.exceedLimitUp': '买入价格不能超过涨停价 {price}',
     'trade.belowLimitDown': '卖出价格不能低于跌停价 {price}',
@@ -217,6 +224,7 @@ const ZH_CN = {
     'auto.directionBuy': '买入',
     'auto.directionSell': '卖出',
     'auto.conditionTextTime': '时间间隔触发',
+    'auto.conditionUnknown': '未知条件（值: {value}）',
     'auto.buySuccess': '买入成功',
     'auto.sellSuccess': '卖出成功',
     'auto.t1Blocked': 'T+1规则限制',
@@ -313,6 +321,7 @@ const ZH_CN = {
     'password.wrongCurrent': '当前密码错误',
     'password.sameAsCurrent': '新密码不能与当前密码相同',
     'password.success': '密码修改成功',
+    'password.updateFailed': '密码更新失败，请重试',
 
     // ==================== 调试面板 ====================
     'debug.title': '🔧 调试面板',
@@ -401,6 +410,8 @@ const ZH_CN = {
     'notification.importSuccess': '导入成功',
     'notification.importFailed': '导入失败：文件格式错误',
     'notification.importConfirm': '确定导入用户 "{username}" 的存档吗？将覆盖现有数据。',
+    'notification.importTooLarge': '导入文件过大，最大支持 5MB',
+    'notification.importConflict': '用户 "{username}" 已存在：输入 replace 覆盖，或 merge 合并（取消则放弃）。',
     'notification.fixFailedNoSave': '修复失败：未加载存档',
     'notification.fixApplied': '异常持仓数据已修复',
     'notification.fixNotFound': '未发现异常持仓数据',
@@ -427,6 +438,8 @@ const ZH_CN = {
 
     // ==================== 补充存档/认证 ====================
     'save.saveFailedStorage': '保存数据失败，可能是存储空间不足',
+    // P1-10 Fix: corrupted local storage warning
+    'load.dataCorrupted': '检测到本地存档数据损坏，已自动备份原始数据并重置账号列表。请勿继续写入，以便后续恢复，并联系支持。',
     'save.renameSuccess': '存档名称修改成功',
     'auth.logoutSuccess': '已成功退出登录',
 

@@ -40,6 +40,9 @@ const EN_US = {
     'auth.regError.passwordLength': 'Password must be 6-20 characters',
     'auth.regError.passwordMismatch': 'Passwords do not match',
     'auth.regError.userExists': 'Username already exists',
+    // P1-7/P1-10 Fix: previously missing keys used by register()
+    'auth.regError.generic': 'Registration failed, please try again',
+    'auth.regError.usernameInvalidChars': 'Username may only contain letters, digits, CJK characters, underscore and hyphen',
     'auth.regSuccess': 'Registration successful, please login',
 
     // ==================== Save Selection ====================
@@ -125,9 +128,13 @@ const EN_US = {
     'trade.estimateAmount': 'Estimate: ',
     'trade.buySuccess': 'Buy successful!',
     'trade.sellSuccess': 'Sell successful!',
+    // P1-10 Fix: shown when persistence failed and the trade was rolled back
+    'trade.saveFailedRollback': 'Save failed; the trade was rolled back. Check storage space and try again',
     'trade.incompleteInfo': 'Please fill in all trading info',
     'trade.notInTradingTime': 'Not in trading hours, cannot trade',
     'trade.invalidPrice': 'Price must be greater than 0',
+    'trade.invalidQuantity': 'Please enter a valid integer quantity',
+    'trade.invalidQuantityUnit': 'Quantity must be a multiple of {unit}',
     'trade.circuitBreakerActive': 'This stock is under circuit breaker, trading suspended',
     'trade.exceedLimitUp': 'Buy price cannot exceed limit up {price}',
     'trade.belowLimitDown': 'Sell price cannot be below limit down {price}',
@@ -217,6 +224,7 @@ const EN_US = {
     'auto.directionBuy': 'Buy',
     'auto.directionSell': 'Sell',
     'auto.conditionTextTime': 'Time interval trigger',
+    'auto.conditionUnknown': 'Unknown condition (value: {value})',
     'auto.buySuccess': 'Buy success',
     'auto.sellSuccess': 'Sell success',
     'auto.t1Blocked': 'T+1 rule blocked',
@@ -313,6 +321,7 @@ const EN_US = {
     'password.wrongCurrent': 'Current password is incorrect',
     'password.sameAsCurrent': 'New password cannot be the same as current',
     'password.success': 'Password changed successfully',
+    'password.updateFailed': 'Password update failed, please try again',
 
     // ==================== Debug Panel ====================
     'debug.title': '🔧 Debug Panel',
@@ -401,6 +410,8 @@ const EN_US = {
     'notification.importSuccess': 'Import successful',
     'notification.importFailed': 'Import failed: invalid file format',
     'notification.importConfirm': 'Import save for user "{username}"? Existing data will be overwritten.',
+    'notification.importTooLarge': 'Import file too large; maximum is 5MB',
+    'notification.importConflict': 'User "{username}" already exists: type replace to overwrite, or merge to combine (cancel to abort).',
     'notification.fixFailedNoSave': 'Fix failed: no save loaded',
     'notification.fixApplied': 'Abnormal holdings fixed',
     'notification.fixNotFound': 'No abnormal holdings found',
@@ -427,6 +438,8 @@ const EN_US = {
 
     // ==================== Additional Save/Auth ====================
     'save.saveFailedStorage': 'Save failed: storage may be full',
+    // P1-10 Fix: corrupted local storage warning
+    'load.dataCorrupted': 'Local save data is corrupted. The raw data was backed up and the account list was reset. Avoid further writes so it can be recovered.',
     'save.renameSuccess': 'Save renamed successfully',
     'auth.logoutSuccess': 'Logged out successfully',
 

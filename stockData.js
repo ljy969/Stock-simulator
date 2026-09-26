@@ -132,7 +132,6 @@ const StockPool = [
     { code: '603659', name: '璞泰来', industry: '新能源' },
     { code: '002340', name: '格林美', industry: '新能源' },
     { code: '300568', name: '星源材质', industry: '新能源' },
-    { code: '002709', name: '天赐材料', industry: '新能源' },
     { code: '603026', name: '石大胜华', industry: '新能源' },
     
     // 光伏
@@ -428,7 +427,6 @@ const StockPool = [
     { code: '002511', name: '中顺洁柔', industry: '日用品' },
     { code: '603899', name: '晨光股份', industry: '文具' },
     { code: '002301', name: '齐心集团', industry: '文具' },
-    { code: '300144', name: '宋城演艺', industry: '传媒' },
     { code: '300251', name: '光线传媒', industry: '传媒' },
     { code: '300133', name: '华策影视', industry: '传媒' },
     { code: '999999', name: '影视飓风', industry: '传媒' },

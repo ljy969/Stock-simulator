@@ -110,7 +110,6 @@
 | 数据存储 | LocalStorage（本地存储） |
 | 数据加密（v2.5.0）| XOR + Base64 自实现加密；**密码使用 PBKDF2-SHA-256（10 万轮 + 随机盐）** |
 | 依赖 | 无任何第三方库，零依赖 |
-| 测试（v2.5.0）| `node:test` + `node:vm`，30 个测试用例覆盖全部安全/正确性修复 |
 
 ---
 
@@ -133,8 +132,6 @@ Stock simulator/
 ├── images/                 # 项目图片资源
 │   ├── cover.jpg           # 中文版封面图
 │   └── cover-en.png        # 英文版封面图
-└── tests/                    # 测试套件（v2.5.0 新增）
-│   └── run.mjs               # 安全/正确性测试，30 个用例覆盖所有 P0/P1/P2 修复
 └── LICENSE                 # MIT 开源许可证
 ```
 
@@ -799,36 +796,6 @@ chartState = {
 3. 在 [index.html](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/index.html) 中添加对应的 `<script>` 标签和语言下拉选项
 4. 为新增的 UI 文本添加 `data-i18n` 属性，并在两个语言资源文件中补充对应键值
 5. 动态生成的文本使用 `I18n.t('key')` 替代硬编码字符串
-
-### 测试（v2.5.0 新增）
-
-`tests/run.mjs` 是本次安全审计对应的回归测试套件，使用 **Node 内置 `node:test` + `node:vm`** 实现，零外部依赖。
-
-**运行方式**：
-
-```bash
-# 在项目根目录执行
-node tests/run.mjs
-```
-
-**测试覆盖范围**：
-
-- 8 个 `crypto.js` 单元测试（PBKDF2 加解密、随机盐、UUID、加密往返）
-- 22 个 `game.js` 集成/静态分析测试（XSS 转义、输入校验、资金精度、熔断、calculateStats、auto-trade 成本、P0-P2 全部修复）
-
-**测试运行后预期输出**：
-
-```
-✔ 30 tests passed, 0 failed
-```
-
-**工作原理**：
-
-测试套件使用 `vm.createContext` 把源文件加载到隔离的 JavaScript 沙箱中，附带一个最小化的 DOM 桩（`FakeElement`、`fakeDocument`、`fakeLocalStorage`），无需 jsdom 之类的依赖。`vm.runInContext` 不会把 `const`/`let`/`class` 顶层声明暴露到上下文，因此 `loadScript()` 会做一次简单的 `const X =` → `var X =` 重写，使测试可以访问 `ctx.Crypto`、`ctx.LimitManager`、`ctx.StockSimulator` 等。
-
-静态分析测试用 `readFileSync` 直接读取 `game.js` 源码，剥离注释行后检查关键字符串（如 `holding.totalCost + totalCost` 是否在自动交易和手动交易两处都出现）。
-
----
 
 ## 未来计划
 

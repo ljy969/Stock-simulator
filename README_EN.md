@@ -8,10 +8,12 @@
 
 A pure-entertainment, zero-stress Chinese A-share stock trading simulator platform. All data is generated and stored locally inside your browser without connecting to real market APIs. Users can learn trading rules, experience market fluctuations, and test strategies in a risk-free environment.
 
-> Version: v2.5.0
+> Version: v2.6.0
 > Updated: 2026-9
 
-> 🛡️ **v2.5.0 Security & Stability Update**: This release fixes 13 security/correctness bugs. All user passwords have been upgraded from 8-character weak hashes to PBKDF2-SHA-256 (100k iterations + random per-user salt). Legacy users are transparently migrated on next successful login. See the [Changelog](#changelog-v250) for details.
+> 🛡️ **v2.6.0 Stability & Robustness Update**: A second round of fixes on top of the v2.5.0 security audit. It fixes **1 P0, 5 P1, and 4 P2 defects (10 in total)** and adds 10 i18n keys (7 previously missing, 3 new). Every fix ships with an automated regression script `verify_fixes.js` (27 cases) that can be re-run with `node verify_fixes.js`. See the [Changelog](#changelog-v260) for details.
+>
+> 🛡️ **v2.5.0 Security Update (historical)**: This release fixed 14 security/correctness bugs. All user passwords have been upgraded from 8-character weak hashes to PBKDF2-SHA-256 (100k iterations + random per-user salt). Legacy users are transparently migrated on next successful login. See the [Changelog](#changelog-v250) for details.
 > Developer: Moke Xintu (Bilibili)
 
 ---
@@ -54,6 +56,7 @@ A pure-entertainment, zero-stress Chinese A-share stock trading simulator platfo
 - [Contact & Credits](#contact--credits)
 - [Contributing](#contributing)
 - [License](#license)
+- [Changelog (v2.6.0)](#changelog-v260)
 - [Changelog (v2.5.0)](#changelog-v250)
 - [Star History](#star-history)
 
@@ -118,17 +121,18 @@ Positioned as a "pure entertainment" tool, it involves no real capital. All mark
 ```
 Stock simulator/
 ├── index.html              # Main page containing all UI structure
-├── game.js                 # Core game logic (5200+ lines)
+├── game.js                 # Core game logic (6000+ lines)
 │   ├── LimitManager class           # Price limit and circuit breaker management
 │   └── StockSimulator class         # Main controller containing all business logic
-├── stockData.js            # A-share stock pool data (300+ stocks)
+├── stockData.js            # A-share stock pool data (385 stocks)
 ├── achievements.js         # Achievement system configuration and logic
 ├── crypto.js               # Encryption utilities (XOR + Base64 + hashing + UUID)
 ├── i18n.js                 # Internationalization core module (I18nManager class)
 ├── locales/                # Language resource files directory
-│   ├── zh-CN.js            # Chinese language resources (512 translations)
-│   └── en-US.js            # English language resources (512 translations)
+│   ├── zh-CN.js            # Chinese language resources (522 translations)
+│   └── en-US.js            # English language resources (522 translations)
 ├── styles.css              # All styles (including 3 themes + language switching UI)
+├── verify_fixes.js         # Automated regression checks (node verify_fixes.js)
 ├── images/                 # Project image resources
 │   ├── cover.jpg           # Chinese version cover image
 │   └── cover-en.png        # English version cover image
@@ -197,7 +201,7 @@ All user data is stored in the browser's LocalStorage under the key `stock_simul
 
 **Feature List**:
 
-- Registration: Username 2-20 characters, password 6-20 characters, requires confirmation; usernames cannot be duplicated
+- Registration: Username 2-20 characters, password 6-20 characters, requires confirmation; usernames cannot be duplicated. Usernames may only contain Chinese characters, letters, digits, underscores, and hyphens, and reserved names such as `__proto__` / `constructor` are rejected (since v2.6.0)
 - Login: Password verified via hash comparison; supports Enter key for quick login
 - Auto-login: Records the most recent user after successful login and auto-logs in next time
 - Change Password: Requires verification of current password, new password requires confirmation
@@ -547,6 +551,10 @@ The tutorial is presented by highlighting target elements, floating tooltips, an
 - **Same-name user conflict dialog** (choose "Overwrite", "Merge", or "Cancel"; merge preserves local preferences)
 - **All user-controllable strings are HTML-escaped before rendering** to prevent script injection via malicious save names
 
+**Write-Failure Protection (v2.6.0)**: If LocalStorage is not writable (private mode, quota exceeded, etc.), `saveUsers()` reports failure, the trade is rolled back to its pre-trade snapshot, and the user is notified — so the UI never shows a completed trade that was not persisted. The trade-success toast is likewise shown only after the data is successfully written.
+
+**Corrupted-Data Protection (v2.6.0)**: When `loadUsers()` fails to decrypt or parse, it first backs up the raw ciphertext to `stock_simulator_users_corrupted_backup_<timestamp>` before continuing, instead of overwriting it, preventing irreversible data loss.
+
 **Right-click Menu**: The browser right-click menu is globally disabled to prevent users from copying page content.
 
 **Browser Back**: Listens for `popstate` events. When a user has logged out, they are forced to stay on the login page to prevent entering a logged-out page via the back button.
@@ -736,9 +744,9 @@ Your language preference is automatically saved and applied on your next visit.
 
 The project is centered around two core classes:
 
-**`LimitManager`** ([game.js:4-95](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L4-L95)): manages price limits and circuit breakers, calculates price boundaries, and tracks breaker states.
+**`LimitManager`** ([game.js:4-104](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L4-L104)): manages price limits and circuit breakers, calculates price boundaries, and tracks breaker states.
 
-**`StockSimulator`** ([game.js:97-5293](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L97-L5293)): the main controller running as the singleton `window.game`, containing the complete business logic. The main method groups are as follows:
+**`StockSimulator`** ([game.js:227-6067](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L227-L6067)): the main controller running as the singleton `window.game`, containing the complete business logic. The main method groups are as follows:
 
 | Module | Main Methods |
 | --- | --- |
@@ -759,7 +767,7 @@ The project is centered around two core classes:
 
 ### Startup Flow
 
-The application startup logic is located in [game.js:5295-5318](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L5295-L5318):
+The application startup logic is located in [game.js:6069-6092](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L6069-L6092):
 
 1. `DOMContentLoaded` event fires
 2. Right-click menu is disabled globally
@@ -858,14 +866,52 @@ Copyright (c) 2026 MOX
 
 ---
 
-**Version**: v2.5.0
+**Version**: v2.6.0
 **Developer**: Moke Xintu (Bilibili)
+
+---
+
+## Changelog (v2.6.0)
+
+> 🛡️ **v2.6.0 Stability & Robustness Update** — A second round of defect fixes on top of the v2.5.0 security audit. It fixes **1 P0 critical bug, 5 P1 high-severity bugs, and 4 P2 medium bugs (10 in total)** and adds 10 i18n keys (7 that code referenced but were missing, 3 new). All fixes ship with an automated regression script `verify_fixes.js` (27 cases) that can be re-run with `node verify_fixes.js`.
+
+### 🔴 P0 Critical Fixes
+
+| ID | Module | Problem | Fix |
+| --- | --- | --- | --- |
+| **P0-3** | Password hash validation | The import path `sanitizeUserData` validated `passwordHash` against a shape that did not match the actual PBKDF2 output. Valid hashes containing `$` were rejected and stripped from the import/export path, losing user data | Added `isValidPasswordHash()`, which accepts both the legacy hex hash and the PBKDF2 format derived from `Crypto.HASH_VERSION` (`<version>$<salt>$<derived>`), so a future KDF upgrade no longer breaks validation |
+
+### 🟠 P1 High-Severity Fixes
+
+| ID | Module | Problem | Fix |
+| --- | --- | --- | --- |
+| **P1-6** | Stock list refresh | `updateAfterTrade()` called a non-existent `updateStockList()`, so the stock list was not refreshed after a trade and prices/changes appeared stale | Now calls `renderStockList(this.stockSearch.keyword)`, preserving the active search filter and redrawing correctly |
+| **P1-7** | Username & prototype pollution | Usernames had no character whitelist, and `this.users` was a normal object, so names such as `__proto__` / `constructor` could pollute the prototype | Added `USERNAME_PATTERN` (character whitelist) and `RESERVED_USERNAMES` (blocklist), shared by import (`sanitizeUserData`) and registration (`register`); `this.users` is now an `Object.create(null)` dictionary |
+| **P1-8** | Timer leak | Switching/loading saves and logging out did not clear old market-refresh and auto-trade timers, so timers stacked up, causing UI jitter and resource leaks | Added a unified `stopAllTimers()` used by `showSaveSelect` and `logout`; `loadSave` and `startAutoTrade` clear before creating. Also fixed `loadSave` creating the auto-trade timer before restoring `refreshRate`, which reused the old interval |
+| **P1-9** | Stock pool data | The pool contained duplicate codes (`002709`, `300144`); with duplicates, `StockPool.find` and the internal Map could disagree | Removed the duplicates (385 unique codes now); `initMarketData` now detects duplicate codes, logs an error, and keeps the first occurrence so `find` and the Map agree |
+| **P1-10** | Storage reliability | `saveUsers()` silently ignored write failures, and `loadUsers()` overwrote the original data on decrypt/parse failure, risking irreversible data loss | `saveUsers()` returns a boolean and notifies on failure; a failed trade write rolls back to the pre-trade snapshot and suppresses the "trade succeeded" toast; `loadUsers()` backs up the raw ciphertext to `stock_simulator_users_corrupted_backup_<timestamp>` and warns instead of overwriting |
+
+### 🟡 P2 Medium Fixes
+
+| ID | Module | Problem | Fix |
+| --- | --- | --- | --- |
+| **P2-8** | Achievement stats performance | `calculateSaveStats()` repeatedly scanned following records with `records.slice(index + 1).filter(...)`, an O(n²) operation | Precomputes future limit-up/limit-down counts in a single reverse pass into a `Map`, reducing it to O(n) |
+| **P2-9** | Logging | 57 business `console.log` calls printed holdings, P&L, and strategy details in production, costing I/O and leaking player strategy | Added a `DEBUG_LOG` flag and `debugLog()`; all business logging is gated and silent by default in production |
+| **P2-10** | K-line box zoom | After a box zoom only the candlestick chart was redrawn; the volume sub-chart was not, so the panes went out of sync | `handleSelectionZoom` now also calls `drawVolume(data)` |
+| **P2-11** | Touch zoom | Pinch zoom did not validate `pinchStartDistance`; a start distance of 0 produced a `NaN` scale factor that polluted chart state | Added a `pinchStartDistance > 0` guard, so invalid gestures leave the zoom state unchanged |
+
+### 📝 Other Fixes (v2.6.0)
+
+- Added 7 i18n keys that code referenced but the locale files lacked (both languages): `auth.regError.generic`, `password.updateFailed`, `trade.invalidQuantity`, `trade.invalidQuantityUnit`, `notification.importTooLarge`, `notification.importConflict`, `auto.conditionUnknown`.
+- Added 3 keys for the new messages introduced by these fixes: `auth.regError.usernameInvalidChars`, `trade.saveFailedRollback`, `load.dataCorrupted`.
+- `executeAutoTrade` shows the trade-success toast only after the data is successfully persisted, avoiding "success shown but not saved".
+- `restoreSaveSnapshot` now guards on `this.users`, avoiding a throw when user data has not been initialized.
 
 ---
 
 ## Changelog (v2.5.0)
 
-> 🛡️ **v2.5.0 Security & Stability Update** — This release is the result of a complete security audit of the project. It fixes **2 P0 critical bugs, 4 P1 high-severity bugs, and 7 P2 medium bugs**. All fixes come with an automated test suite (`tests/run.mjs`, 30 cases total) that can be re-run with `node tests/run.mjs`.
+> 🛡️ **v2.5.0 Security & Stability Update** — This release is the result of a complete security audit of the project. It fixes **2 P0 critical bugs, 5 P1 high-severity bugs, and 7 P2 medium bugs (14 in total)**. The regression script for that audit round is not included in this repository snapshot; since v2.6.0, `verify_fixes.js` is used instead.
 
 ### 🔴 P0 Critical Fixes
 

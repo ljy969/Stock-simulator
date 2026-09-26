@@ -8,10 +8,12 @@
 
 一个纯娱乐、零压力的 A 股模拟炒股平台。所有数据均在浏览器本地生成与存储，不连接任何真实行情接口，用户可在无资金风险的环境中学习股票交易规则、体验市场波动并测试自己的交易策略。
 
-> 版本：v2.5.0
+> 版本：v2.6.0
 > 更新时间：2026-9
 
-> 🛡️ **v2.5.0 安全与稳定性更新**：本版本修复了 13 项安全/正确性缺陷，详见[更新日志](#更新日志v250)。所有用户密码已从 8 位弱哈希升级至 PBKDF2-SHA-256（10 万轮 + 随机盐），旧用户首次登录时自动平滑迁移。
+> 🛡️ **v2.6.0 稳定性与健壮性更新**：在 v2.5.0 安全审计的基础上完成第二轮修复，共修复 **1 个 P0、5 个 P1、4 个 P2 缺陷（10 项）**，并补齐 10 个国际化词条（7 个代码已调用却缺失、3 个为本次新增提示）。所有修复均带有自动化回归验证脚本 `verify_fixes.js`（27 个用例），可通过 `node verify_fixes.js` 复跑。详见[更新日志](#更新日志v260)。
+>
+> 🛡️ **v2.5.0 安全更新（历史）**：修复 14 项安全/正确性缺陷，详见[更新日志](#更新日志v250)。所有用户密码已从 8 位弱哈希升级至 PBKDF2-SHA-256（10 万轮 + 随机盐），旧用户首次登录时自动平滑迁移。
 > 开发者：莫客星图（Bilibili）
 
 ---
@@ -54,6 +56,7 @@
 - [许可证](#许可证)
 - [未来计划](#未来计划)
 - [贡献规范](#贡献规范)
+- [更新日志（v2.6.0）](#更新日志v260)
 - [更新日志（v2.5.0）](#更新日志v250)
 - [Star历史](#Star历史)
 
@@ -118,17 +121,18 @@
 ```
 Stock simulator/
 ├── index.html              # 主页面，包含所有界面结构
-├── game.js                 # 核心游戏逻辑（5200+ 行）
+├── game.js                 # 核心游戏逻辑（6000+ 行）
 │   ├── LimitManager 类           # 涨跌停与熔断管理
 │   └── StockSimulator 类         # 主控制器，包含全部业务逻辑
-├── stockData.js            # A 股股票池数据（300+ 只股票）
+├── stockData.js            # A 股股票池数据（385 只股票）
 ├── achievements.js         # 成就系统配置与逻辑
 ├── crypto.js               # 加密工具（XOR + Base64 + 哈希 + UUID）
 ├── i18n.js                 # 国际化核心模块（I18nManager 类）
 ├── locales/                # 语言资源文件目录
-│   ├── zh-CN.js            # 中文语言资源（512 条翻译）
-│   └── en-US.js            # 英文语言资源（512 条翻译）
+│   ├── zh-CN.js            # 中文语言资源（522 条翻译）
+│   └── en-US.js            # 英文语言资源（522 条翻译）
 ├── styles.css              # 全部样式（含三套主题 + 语言切换 UI）
+├── verify_fixes.js         # 自动化回归验证脚本（node verify_fixes.js）
 ├── images/                 # 项目图片资源
 │   ├── cover.jpg           # 中文版封面图
 │   └── cover-en.png        # 英文版封面图
@@ -197,7 +201,7 @@ Stock simulator/
 
 **功能列表**：
 
-- 注册：用户名 2-20 位，密码 6-20 位，需二次确认；用户名不可重复
+- 注册：用户名 2-20 位，密码 6-20 位，需二次确认；用户名不可重复。用户名仅允许中文、字母、数字、下划线、连字符，且禁止 `__proto__`、`constructor` 等保留名（v2.6.0 起）
 - 登录：密码经哈希比对验证；支持回车键快速登录
 - 自动登录：登录成功后记录最近用户，下次打开自动登录
 - 修改密码：需验证当前密码，新密码需二次确认
@@ -546,6 +550,10 @@ chartState = {
 - **同名用户冲突对话框**（可选择「覆盖」「合并」或「取消」；合并会保留本地偏好）
 - **所有用户可控字符串在渲染前进行 HTML 转义**，防止通过恶意存档名注入脚本
 
+**存档写入失败保护（v2.6.0）**：若 LocalStorage 不可写（隐私模式、配额已满等），`saveUsers()` 会返回失败，交易将回滚到操作前的快照并提示用户，不会出现「界面已成交但数据未落盘」；交易成功提示也仅在数据成功落盘后展示。
+
+**损坏数据保护（v2.6.0）**：`loadUsers()` 在解密/解析失败时，会先把原始密文备份到 `stock_simulator_users_corrupted_backup_<时间戳>` 再继续，不再直接覆盖，避免用户数据被不可逆地丢失。
+
 **右键菜单**：全局禁用浏览器右键菜单，防止用户复制页面内容。
 
 **浏览器后退**：监听 `popstate` 事件，当用户已退出登录时强制保持在登录页面，防止通过后退按钮进入已退出的页面。
@@ -735,9 +743,9 @@ chartState = {
 
 项目由两个核心类构成：
 
-**`LimitManager`**（[game.js:4-95](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L4-L95)）：涨跌停与熔断管理器，负责价格边界计算、熔断状态维护。
+**`LimitManager`**（[game.js:4-104](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L4-L104)）：涨跌停与熔断管理器，负责价格边界计算、熔断状态维护。
 
-**`StockSimulator`**（[game.js:97-5293](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L97-L5293)）：主控制器，单例运行于 `window.game`，包含全部业务逻辑，主要方法分组如下：
+**`StockSimulator`**（[game.js:227-6067](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L227-L6067)）：主控制器，单例运行于 `window.game`，包含全部业务逻辑，主要方法分组如下：
 
 | 模块 | 主要方法 |
 | --- | --- |
@@ -758,7 +766,7 @@ chartState = {
 
 ### 启动流程
 
-应用启动逻辑位于 [game.js:5295-5318](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L5295-L5318)：
+应用启动逻辑位于 [game.js:6069-6092](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L6069-L6092)：
 
 1. `DOMContentLoaded` 事件触发
 2. 全局禁用右键菜单
@@ -855,14 +863,52 @@ Copyright (c) 2026 MOX
 
 ---
 
-**版本信息**：v2.5.0
+**版本信息**：v2.6.0
 **开发人员**：莫客星图
+
+---
+
+## 更新日志（v2.6.0）
+
+> 🛡️ **v2.6.0 稳定性与健壮性更新** — 本次更新是在 v2.5.0 安全审计基础上的第二轮缺陷修复，共修复 **1 个 P0 严重缺陷、5 个 P1 高危缺陷、4 个 P2 中等缺陷（共 10 项）**，并补齐 10 个国际化词条（7 个代码已调用却缺失、3 个为本次新增提示）。所有修复配套自动化回归验证脚本 `verify_fixes.js`（共 27 个用例），可通过 `node verify_fixes.js` 复跑。
+
+### 🔴 P0 严重缺陷修复
+
+| 编号 | 模块 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| **P0-3** | 密码哈希校验 | 导入路径 `sanitizeUserData` 对 `passwordHash` 的格式校验与 PBKDF2 实际输出不匹配，带 `$` 的合法哈希被判为非法并在导入/导出链路中被清洗，导致用户数据丢失 | 新增 `isValidPasswordHash()`，同时接受旧版十六进制哈希与由 `Crypto.HASH_VERSION` 动态推导的 PBKDF2 格式（`<版本>$<盐>$<派生值>`），未来升级 KDF 也不需再改校验 |
+
+### 🟠 P1 高危缺陷修复
+
+| 编号 | 模块 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| **P1-6** | 股票列表刷新 | `updateAfterTrade()` 调用了并不存在的 `updateStockList()`，交易完成后股票列表不刷新，价格与涨跌显示滞后 | 改为调用 `renderStockList(this.stockSearch.keyword)`，保留当前搜索条件并正确重绘 |
+| **P1-7** | 用户名与原型污染 | 用户名未限制字符集；`this.users` 使用普通对象，用户名 `__proto__` / `constructor` 等可污染对象原型 | 新增 `USERNAME_PATTERN` 字符白名单与 `RESERVED_USERNAMES` 保留名黑名单，导入（`sanitizeUserData`）与注册（`register`）共用；`this.users` 改为 `Object.create(null)` 无原型字典 |
+| **P1-8** | 定时器泄漏 | 切换/加载存档与退出登录时，旧的行情刷新与自动交易定时器未清理，多个定时器叠加运行，造成界面抖动与资源泄漏 | 新增统一的 `stopAllTimers()`，在 `showSaveSelect`、`logout` 中调用；`loadSave`、`startAutoTrade` 创建定时器前先清理；同时修复 `loadSave` 在恢复 `refreshRate` 之前就创建定时器、沿用旧刷新间隔的问题 |
+| **P1-9** | 股票池数据 | 股票池存在重复代码（`002709`、`300144`），且 `StockPool.find` 与内部 Map 在重复代码下结果可能不一致 | 删除重复条目（现为 385 只唯一代码）；`initMarketData` 增加重复代码检测，输出错误日志并「首条生效」，保证 `find` 与 Map 口径一致 |
+| **P1-10** | 存储可靠性 | `saveUsers()` 写入失败时静默忽略；`loadUsers()` 在解密/解析失败时直接覆盖原始数据，可能不可逆地丢失用户数据 | `saveUsers()` 返回布尔并在失败时通知用户；交易写盘失败时回滚到操作前快照且不弹「交易成功」；`loadUsers()` 损坏时先把原始密文备份到 `stock_simulator_users_corrupted_backup_<时间戳>` 并告警，不再覆盖 |
+
+### 🟡 P2 中等缺陷修复
+
+| 编号 | 模块 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| **P2-8** | 成就统计性能 | `calculateSaveStats()` 通过 `records.slice(index + 1).filter(...)` 反复扫描后续记录，复杂度 O(n²) | 改为一次倒序遍历预计算「未来涨停/跌停次数」到 `Map`，降为 O(n) |
+| **P2-9** | 日志输出 | 57 处业务 `console.log` 在生产环境持续输出持仓、盈亏与策略细节，既有性能开销又泄露玩家策略 | 新增 `DEBUG_LOG` 开关与 `debugLog()`，业务日志全部收敛，生产环境默认静默 |
+| **P2-10** | K 线框选 | 框选放大后只重绘了 K 线主图，未重绘成交量副图，主副图不同步 | `handleSelectionZoom` 补充调用 `drawVolume(data)` |
+| **P2-11** | 触摸缩放 | 双指缩放未校验 `pinchStartDistance`，起始距离为 0 时会算出 `NaN` 缩放系数并污染图表状态 | 增加 `pinchStartDistance > 0` 守卫，非法手势不改变缩放状态 |
+
+### 📝 其他修正（v2.6.0）
+
+- 补齐 7 处「代码中调用但语言文件缺失」的国际化词条（中英文同步）：`auth.regError.generic`、`password.updateFailed`、`trade.invalidQuantity`、`trade.invalidQuantityUnit`、`notification.importTooLarge`、`notification.importConflict`、`auto.conditionUnknown`。
+- 为本次修复新增的提示文案补充 3 个词条：`auth.regError.usernameInvalidChars`、`trade.saveFailedRollback`、`load.dataCorrupted`。
+- `executeAutoTrade` 仅在数据成功落盘后才提示交易成功，避免「提示成功但未保存」。
+- `restoreSaveSnapshot` 增加 `this.users` 存在性守卫，避免在用户数据未初始化时抛错。
 
 ---
 
 ## 更新日志（v2.5.0）
 
-> 🛡️ **v2.5.0 安全与稳定性更新** — 本次更新是对整个项目的一次完整安全审计后的修复版本，修复了 **2 个 P0 严重缺陷、4 个 P1 高危缺陷、7 个 P2 中等缺陷**。所有修复均带有自动化测试（`tests/run.mjs`，共 30 个用例），可通过 `node tests/run.mjs` 复跑验证。
+> 🛡️ **v2.5.0 安全与稳定性更新** — 本次更新是对整个项目的一次完整安全审计后的修复版本，修复了 **2 个 P0 严重缺陷、5 个 P1 高危缺陷、7 个 P2 中等缺陷（共 14 项）**。该轮审计的回归测试脚本未随本仓库快照提供；自 v2.6.0 起使用 `verify_fixes.js`。
 
 ### 🔴 P0 严重缺陷修复
 

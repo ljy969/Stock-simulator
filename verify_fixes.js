@@ -489,6 +489,144 @@ console.log('\n=== Stock Simulator fix verification ===\n');
     assert.strictEqual(missing.length, 0, 'missing zh keys: ' + missing.join(', '));
   });
 
+  // ---------------- Auto-trade audit fixes (report round 2) ----------------
+  function autoDeps(g, save) {
+    g.currentSave = save;
+    g.currentUser = { username: 'u', saves: [save] };
+    g.users = { u: g.currentUser };
+    g.currentSaveIndex = 0;
+    g.saveUsers = () => true;
+    g.updateTradeAvailable = () => {};
+    g.updatePortfolio = () => {};
+    g.checkAchievements = () => {};
+    g.updateAutoTradeStatus = () => {};
+    g.updateAutoTradeStats = () => {};
+    return g;
+  }
+
+  test('P1-auto', 'paused game time freezes auto trade (no real-clock trading)', () => {
+    const g = newGame();
+    g.currentSave = baseSave();
+    g.autoTrade.enabled = true;
+    g.autoTrade.paused = false;
+    g.autoTrade.configs = [{ code: '600519', direction: 'buy', conditionType: 'time', quantity: 100, priceType: 'market', name: '贵州茅台' }];
+    g.stockData.set('600519', { code: '600519', price: 100, prevClose: 100 });
+    let calls = 0;
+    g.executeAutoTrade = () => { calls++; };
+    g.gameTimePaused = true;      // still inside the 9:30-11:30 window
+    g.checkAutoTradeCondition();
+    assert.strictEqual(calls, 0, 'must not trade while game time is paused');
+    g.gameTimePaused = false;
+    g.checkAutoTradeCondition();
+    assert.strictEqual(calls, 1, 'trades again once resumed');
+  });
+
+  test('P1-auto', 'pause/resume does not reset maxTrades / cooldown counters', () => {
+    const g = newGame();
+    autoDeps(g, baseSave());
+    g.autoTrade.enabled = true;
+    g.autoTrade.stockTradeCounts = { '600519-buy': 1 };
+    g.autoTrade.lastTradeTimes = { '600519-buy': 12345 };
+    g.autoTrade.interval = null;
+    g.pauseAutoTrade();   // pause
+    g.pauseAutoTrade();   // resume
+    assert.strictEqual(g.autoTrade.stockTradeCounts['600519-buy'], 1, 'maxTrades counter survives pause/resume');
+    assert.strictEqual(g.autoTrade.lastTradeTimes['600519-buy'], 12345, 'cooldown survives pause/resume');
+    if (g.autoTrade.interval) { clearInterval(g.autoTrade.interval); g.autoTrade.interval = null; }
+  });
+
+  test('P1-auto', 'loadSave restores risk-control counters (no bypass by switching saves)', () => {
+    const g = newGame();
+    intervals.clear();
+    const save = baseSave({ autoTrade: { enabled: false, paused: false, configs: [], stats: {}, records: [], stockTradeCounts: { '600519-buy': 2 }, lastTradeTimes: { '600519-buy': 999 }, maxTotalTrades: 37 } });
+    g.currentUser = { username: 'u', saves: [save], refreshRate: 1000, theme: 'dark' };
+    g.currentSaveIndex = 0;
+    g.cancelSkip = function () {}; g.initMarketData = function () {}; g.showScreen = function () {};
+    g.updateAutoTradeStatus = function () {}; g.renderStockList = function () {}; g.selectStock = function () {};
+    g.startMarketSimulation = function () {}; g.updateTradeAvailable = function () {}; g.renderAutoTradeStockList = function () {};
+    g.updateAutoTradeStats = function () {}; g.onAutoTradeDirectionChange = function () {}; g.updateProfile = function () {}; g.startTutorial = function () {};
+    g.loadSave(0);
+    assert.strictEqual(g.autoTrade.stockTradeCounts['600519-buy'], 2, 'stockTradeCounts restored');
+    assert.strictEqual(g.autoTrade.lastTradeTimes['600519-buy'], 999, 'lastTradeTimes restored');
+    assert.strictEqual(g.autoTrade.maxTotalTrades, 37, 'maxTotalTrades restored');
+  });
+
+  test('P1-auto', 'maxTrades cannot be bypassed by pause/resume', () => {
+    const g = newGame();
+    autoDeps(g, baseSave({ fund: 1000000 }));
+    g._stockPoolByCode = new Map([['600519', { code: '600519', name: '贵州茅台', industry: '白酒' }]]);
+    g.stockData.set('600519', { code: '600519', price: 100, prevClose: 100 });
+    const config = { code: '600519', name: '贵州茅台', direction: 'buy', conditionType: 'time', quantity: 100, priceType: 'market', maxTrades: 1 };
+    g.executeAutoTrade(config);
+    assert.strictEqual(g.autoTrade.stockTradeCounts['600519-buy'], 1, 'first trade counted');
+    const fundAfterFirst = g.currentSave.fund;
+    g.autoTrade.interval = setInterval(() => {}, 1000);
+    g.pauseAutoTrade();
+    g.pauseAutoTrade();
+    if (g.autoTrade.interval) { clearInterval(g.autoTrade.interval); g.autoTrade.interval = null; }
+    g.executeAutoTrade(config);
+    assert.strictEqual(g.autoTrade.stockTradeCounts['600519-buy'], 1, 'second trade still blocked by maxTrades');
+    assert.strictEqual(g.currentSave.fund, fundAfterFirst, 'no extra trade after resume');
+  });
+
+  test('P2-auto', 'auto-trade buy updates gameStats.maxHoldings (achievements/statistics)', () => {
+    const g = newGame();
+    autoDeps(g, baseSave({ fund: 100000000 }));
+    const codes = [];
+    const pool = [];
+    for (let i = 0; i < 5; i++) {
+      const code = '60' + String(1000 + i);
+      g.stockData.set(code, { code, price: 10, prevClose: 10 });
+      pool.push([code, { code, name: 'S' + i, industry: '行业' + i }]);
+      codes.push(code);
+    }
+    g._stockPoolByCode = new Map(pool);
+    for (const code of codes) {
+      g.executeAutoTrade({ code, name: 'S', direction: 'buy', conditionType: 'time', quantity: 100, priceType: 'market' });
+    }
+    assert.strictEqual(Object.keys(g.currentSave.holdings).length, 5, 'five holdings opened');
+    assert.strictEqual(g.currentSave.gameStats.maxHoldings, 5, 'maxHoldings tracks auto-trade holdings');
+  });
+
+  test('P2-auto', 'global trade cap notifies once and shows a distinct status', () => {
+    const g = newGame();
+    autoDeps(g, baseSave());
+    g.stockData.set('600519', { code: '600519', price: 100, prevClose: 100 });
+    g.autoTrade.enabled = true;
+    g.autoTrade.stats.totalTrades = 100;   // default global cap
+    g.updateAutoTradeStatus = X.StockSimulator.prototype.updateAutoTradeStatus.bind(g);
+    notifications = [];
+    const config = { code: '600519', direction: 'buy', conditionType: 'time', quantity: 100, priceType: 'market', name: '贵州茅台' };
+    g.executeAutoTrade(config);
+    g.executeAutoTrade(config);
+    assert.strictEqual(notifications.filter(n => /上限|limit/i.test(n.msg)).length, 1, 'cap notice emitted exactly once');
+    const el = documentStub.getElementById('auto-trade-status-text');
+    assert.strictEqual(el.textContent, X.I18n.t('auto.statusLimitReached'), 'distinct limit status rendered');
+    g.setAutoTradeMaxTotal(250);
+    assert.strictEqual(g.autoTrade.maxTotalTrades, 250, 'global limit is configurable');
+    assert.strictEqual(g.currentSave.autoTrade.maxTotalTrades, 250, 'configured limit persisted to save');
+  });
+
+  test('P2-auto', 'remaining quota is rendered in the stats panel', () => {
+    const g = newGame();
+    g.currentSave = baseSave();
+    g.autoTrade.stats.totalTrades = 30;
+    g.autoTrade.maxTotalTrades = 100;
+    g.autoTrade.records = [];
+    g.updateAutoTradeStats();
+    const el = documentStub.getElementById('auto-remaining-trades');
+    assert.strictEqual(el.textContent, '70 / 100');
+  });
+
+  test('P2-auto', 'resetAutoTradeConfig no longer crashes on an undefined method', () => {
+    const g = newGame();
+    autoDeps(g, baseSave());
+    g.renderAutoTradeStockList = () => {};
+    g.updateAutoTradeStatus = () => {};
+    confirmReturn = true;
+    assert.strictEqual(g.resetAutoTradeConfig(), true);
+  });
+
   // ---------- summary ----------
   const failed = results.filter(r => !r.ok);
   console.log('\n=== Summary ===');

@@ -337,6 +337,7 @@ Automated trading is an advanced feature that allows users to configure automate
 | Take-profit Amount | Auto-sell when profit reaches threshold |
 | Max Trade Count | Maximum auto-trade count per stock |
 | Max Trade Amount | Maximum trade amount per order |
+| Global Max Trades | Cumulative trade limit for the whole auto-trade run (default 100, editable on the Risk Control tab) |
 
 **Trigger Condition Explanation**:
 
@@ -345,13 +346,13 @@ Automated trading is an advanced feature that allows users to configure automate
 - **Profit Target**: Only applies to selling; triggers when profit/loss amount based on holding cost reaches the set value
 - **Time Interval**: Automatically triggers every 30 seconds (not constrained by condition values)
 
-**Cooldown Mechanism**: To prevent repeated trades, each stock has a cooldown period after each trigger. Default is 5 seconds; 30 seconds in interval mode.
+**Cooldown Mechanism**: To prevent repeated trades, each stock has a cooldown period after each trigger. Default is 5 seconds; 30 seconds in interval mode. Cooldowns and per-stock max trade counts are persisted with the save: pausing, resuming, or switching saves never resets them, and only "Stop" clears them.
 
-**Risk Control**: In addition to basic trigger conditions, sell operations also check stop-loss and take-profit. When the profit/loss amount reaches the stop-loss threshold (negative) or take-profit threshold (positive), a sell is automatically triggered.
+**Risk Control**: In addition to basic trigger conditions, sell operations also check stop-loss and take-profit. When the profit/loss amount reaches the stop-loss threshold (negative) or take-profit threshold (positive), a sell is automatically triggered. Once the global trade limit is reached, the status indicator switches to "Trade limit reached" and a notice appears once instead of failing silently.
 
-**Statistics and Records**: Automated trading maintains its own statistics (total trades, success/failure count, total P&L) and trade records (up to 50). You can view them on the "Trade Records" tab.
+**Statistics and Records**: Automated trading maintains its own statistics (total trades, success/failure count, total P&L, remaining quota) and trade records (up to 50). You can view them on the "Trade Records" tab. Auto-trade buys also count toward save statistics (trade count, sector coverage, and max holdings), so holding-based achievements can be unlocked normally.
 
-**Operations**: Add, edit, delete single configurations, one-click reset all configurations, start, pause, and stop automated trading.
+**Operations**: Add, edit, delete single configurations, one-click reset all configurations, configure the global trade limit, start, pause, and stop automated trading. Pausing game time freezes both the market and auto trading, so no trades execute on the real clock.
 
 ### Achievement System
 
@@ -407,6 +408,8 @@ gameTime = {
 - Afternoon open (13:00)
 - Before close (14:55)
 - Random time
+
+> Pausing game time freezes market updates and auto trading together; both resume when unpaused.
 
 ### K-Line Charting System
 
@@ -648,9 +651,9 @@ The top navigation bar contains five main pages:
 
 - Three tabs: trigger conditions, risk control, trading records
 - Trigger conditions: stock list + add stock form
-- Risk control: stop loss, take profit, max trade count, max trade amount
-- Trading records: auto-trading history and statistics
-- Top status indicator: not started / running / paused
+- Risk control: stop loss, take profit, per-stock max trade count, max trade amount per order, global max trades
+- Trading records: auto-trading history and statistics (including remaining quota)
+- Top status indicator: not started / running / paused / trade limit reached
 
 #### Portfolio Page (portfolio-page)
 
@@ -713,8 +716,9 @@ Possible reasons include:
 - The market was not in a trading session
 - The cooldown period had not expired (default 5s; 30s in interval mode)
 - The trigger condition was not met
-- The stock reached its maximum allowed trade count
+- The stock reached its maximum allowed trade count, or the global max trade limit was reached
 - Available funds or holdings were insufficient
+- Game time is paused (both the market and auto trading are frozen)
 
 ### What is the "影视飓风" stock?
 

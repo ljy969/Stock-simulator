@@ -77,7 +77,13 @@ class I18nManager {
         this.currentMessages = this.locales[lang]() || {};
 
         if (persist) {
-            localStorage.setItem(this.storageKey, lang);
+            // P2-8 Fix: storage may be disabled or full; a failed language-preference
+            // write must not abort the language switch itself.
+            try {
+                localStorage.setItem(this.storageKey, lang);
+            } catch (e) {
+                console.warn('[I18n] 无法保存语言偏好:', e);
+            }
         }
 
         // 同步 <html lang="..."> 属性
@@ -173,6 +179,12 @@ class I18nManager {
         document.querySelectorAll('[data-i18n-title]').forEach(el => {
             const key = el.getAttribute('data-i18n-title');
             el.setAttribute('title', this.t(key));
+        });
+
+        // 3b. data-i18n-aria-label: 设置 aria-label（无障碍标签，L15 Fix）
+        document.querySelectorAll('[data-i18n-aria-label]').forEach(el => {
+            const key = el.getAttribute('data-i18n-aria-label');
+            el.setAttribute('aria-label', this.t(key));
         });
 
         // 4. data-i18n-html: 设置 innerHTML

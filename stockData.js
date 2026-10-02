@@ -161,7 +161,7 @@ const StockPool = [
     { code: '300496', name: '中科创达', industry: '软件' },
     { code: '300308', name: '中际旭创', industry: '通信' },
     { code: '300502', name: '新易盛', industry: '通信' },
-    { code: '000938', name: '中芯国际', industry: '通信' },
+    { code: '000938', name: '紫光股份', industry: '通信' },  // L16 Fix: was a duplicate '中芯国际' (688981)
     { code: '600498', name: '烽火通信', industry: '通信' },
     { code: '000063', name: '中兴通讯', industry: '通信' },
     

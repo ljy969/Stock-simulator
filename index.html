@@ -23,16 +23,16 @@
                 </div>
                 
                 <div id="login-form" class="auth-form active">
-                    <input type="text" id="login-username" placeholder="用户名" maxlength="20" data-i18n-placeholder="auth.usernamePlaceholder">
-                    <input type="password" id="login-password" placeholder="密码" maxlength="20" data-i18n-placeholder="auth.passwordPlaceholder">
+                    <input type="text" id="login-username" placeholder="用户名" data-i18n-placeholder="auth.usernamePlaceholder">
+                    <input type="password" id="login-password" placeholder="密码" data-i18n-placeholder="auth.passwordPlaceholder">
                     <button type="button" id="login-btn" class="btn-primary" data-i18n="auth.loginBtn">登录</button>
                     <div id="login-error" class="error-msg"></div>
                 </div>
                 
                 <div id="register-form" class="auth-form">
-                    <input type="text" id="reg-username" placeholder="用户名 (2-20位)" maxlength="20" data-i18n-placeholder="auth.regUsernamePlaceholder">
-                    <input type="password" id="reg-password" placeholder="密码 (6-20位)" maxlength="20" data-i18n-placeholder="auth.regPasswordPlaceholder">
-                    <input type="password" id="reg-confirm" placeholder="确认密码" maxlength="20" data-i18n-placeholder="auth.regConfirmPlaceholder">
+                    <input type="text" id="reg-username" placeholder="用户名 (2-20位)" data-i18n-placeholder="auth.regUsernamePlaceholder">
+                    <input type="password" id="reg-password" placeholder="密码 (6-20位)" data-i18n-placeholder="auth.regPasswordPlaceholder">
+                    <input type="password" id="reg-confirm" placeholder="确认密码" data-i18n-placeholder="auth.regConfirmPlaceholder">
                     <button type="button" id="register-btn" class="btn-primary" data-i18n="auth.registerBtn">注册</button>
                     <div id="reg-error" class="error-msg"></div>
                 </div>
@@ -55,7 +55,7 @@
                 <h3 data-i18n="rename.title">修改存档名称</h3>
                 <div class="form-row">
                     <label data-i18n="rename.label">存档名称</label>
-                    <input type="text" id="rename-save-input" maxlength="20" placeholder="请输入存档名称（1-20个字符）" data-i18n-placeholder="rename.placeholder">
+                    <input type="text" id="rename-save-input" placeholder="请输入存档名称（1-20个字符）" data-i18n-placeholder="rename.placeholder">
                     <small class="form-hint" data-i18n="rename.hint">支持中英文、数字及常用符号</small>
                 </div>
                 <div class="form-error" id="rename-save-error"></div>
@@ -154,6 +154,7 @@
                         <div class="watchlist-toggle">
                             <button id="watchlist-toggle-btn" class="btn-watchlist" data-i18n="market.watchlistView">查看自选</button>
                         </div>
+                        <button id="reset-kline-btn" class="btn-watchlist btn-reset-kline" title="重置K线" data-i18n-title="market.resetKline" data-i18n-aria-label="market.resetKline" data-i18n="market.resetKline">🔄 重置K线</button>
                         <div class="stock-list-header">
                             <span class="sortable" data-sort="name"><span data-i18n="market.colName">股票</span><span class="sort-indicator"></span></span>
                             <span class="sortable" data-sort="price"><span data-i18n="market.colPrice">最新价</span><span class="sort-indicator"></span></span>
@@ -185,13 +186,13 @@
                             </div>
                             <div class="detail-chart">
                                 <div class="chart-toolbar">
-                                    <button id="chart-zoom-in" class="chart-btn" title="放大" data-i18n-title="market.chartZoomIn" aria-label="放大">
+                                    <button id="chart-zoom-in" class="chart-btn" title="放大" data-i18n-title="market.chartZoomIn" data-i18n-aria-label="market.chartZoomIn">
                                         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/><line x1="8" y1="11" x2="14" y2="11"/><line x1="11" y1="8" x2="11" y2="14"/></svg>
                                     </button>
-                                    <button id="chart-zoom-out" class="chart-btn" title="缩小" data-i18n-title="market.chartZoomOut" aria-label="缩小">
+                                    <button id="chart-zoom-out" class="chart-btn" title="缩小" data-i18n-title="market.chartZoomOut" data-i18n-aria-label="market.chartZoomOut">
                                         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
                                     </button>
-                                    <button id="chart-reset" class="chart-btn" title="重置" data-i18n-title="market.chartReset" aria-label="重置">
+                                    <button id="chart-reset" class="chart-btn" title="重置" data-i18n-title="market.chartReset" data-i18n-aria-label="market.chartReset">
                                         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
                                     </button>
                                     <span class="chart-hint" data-i18n="market.chartHint">滚轮缩放 | 拖拽移动 | 框选放大</span>
@@ -716,6 +717,7 @@
                     <p id="achievement-name"></p>
                 </div>
                 <button id="view-achievement-btn" class="btn-primary btn-small" data-i18n="achievement.view">查看</button>
+                <button id="poster-achievement-btn" class="btn-text btn-small" data-i18n="achievement.poster">海报</button>
             </div>
         </div>
 

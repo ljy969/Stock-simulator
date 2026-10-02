@@ -633,6 +633,299 @@ body.festival-theme {
     box-shadow: 0 4px 12px rgba(88, 166, 255, 0.3);
 }
 
+/* 重置K线图 */
+.btn-reset-kline {
+    margin-top: 8px;
+    color: var(--danger-color);
+}
+
+.btn-reset-kline:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--danger-color);
+    color: var(--danger-color);
+}
+
+/* ==================== 重置K线图弹窗 ====================
+   弹窗为 flex 列布局：标题/说明 → 搜索框 → 全选栏 → 范围胶囊 →
+   股票列表(flex:1 撑满) → 风险提示 → 操作区，底部按钮永远不会被挤出视口。
+   注意：必须用 .modal-content.reset-kline-content 提升选择器优先级，
+   才能覆盖下方 .modal-content 通用规则（h3 大间距、按钮 width:100% 等）。 */
+.modal-content.reset-kline-content {
+    display: flex;
+    flex-direction: column;
+    width: min(460px, 94vw);
+    min-width: 0;
+    max-width: none;
+    max-height: 88vh;
+    padding: 22px 24px;
+    box-sizing: border-box;
+}
+
+.modal-content.reset-kline-content h3 {
+    margin: 0 0 8px;
+    font-size: 18px;
+    flex: none;
+}
+
+.reset-kline-desc {
+    margin: 0 0 12px;
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: var(--text-secondary);
+    flex: none;
+}
+
+/* 搜索框 + 内嵌清空(×)按钮 */
+.reset-kline-search-wrap {
+    position: relative;
+    margin-bottom: 10px;
+    flex: none;
+}
+
+.reset-kline-search-wrap #reset-kline-search {
+    width: 100%;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 10px 34px 10px 12px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
+.reset-kline-search-wrap #reset-kline-search:focus {
+    outline: none;
+    border-color: var(--primary-color);
+}
+
+.reset-kline-search-clear {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.reset-kline-search-clear.visible {
+    display: flex;
+}
+
+.reset-kline-search-clear:hover {
+    background: var(--border-color);
+    color: var(--text-primary);
+}
+
+/* 列表表头：左侧全选复选框，右侧已选数量 */
+.reset-kline-listbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+    flex: none;
+}
+
+.reset-kline-selectall {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-primary);
+    cursor: pointer;
+    user-select: none;
+}
+
+.reset-kline-selectall input {
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    accent-color: var(--primary-color);
+    cursor: pointer;
+}
+
+.reset-kline-count {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* 快捷选择范围：紧凑型胶囊按钮（当前查看 / 自选股 / 搜索结果） */
+.reset-kline-scopes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+    flex: none;
+}
+
+.reset-kline-scope-btn {
+    padding: 5px 12px;
+    font-size: 12px;
+    line-height: 1.4;
+    border-radius: 999px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+}
+
+.reset-kline-scope-btn:hover {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+    background: rgba(88, 166, 255, 0.12);
+}
+
+/* 股票列表：flex:1 撑满弹窗中部剩余空间，只在区域内部滚动 */
+.reset-kline-list {
+    flex: 1 1 auto;
+    min-height: 120px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 4px;
+}
+
+/* 整行即为 label，点击任意位置均可勾选 */
+.reset-kline-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.reset-kline-row:hover {
+    background: var(--bg-tertiary);
+}
+
+/* 选中行：整行浅色高亮，滚动时也能一眼识别 */
+.reset-kline-row.selected {
+    background: rgba(88, 166, 255, 0.14);
+}
+
+.reset-kline-row.selected:hover {
+    background: rgba(88, 166, 255, 0.2);
+}
+
+.reset-kline-row input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    flex: none;
+    accent-color: var(--primary-color);
+    cursor: pointer;
+}
+
+.reset-kline-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+}
+
+.reset-kline-row.selected .reset-kline-name {
+    color: var(--primary-color);
+    font-weight: 500;
+}
+
+.reset-kline-code {
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 400;
+}
+
+.reset-kline-price {
+    flex: none;
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+.reset-kline-empty {
+    padding: 24px 12px;
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+/* 风险提示：紧贴操作区，使用警示色，避免被忽略 */
+.reset-kline-warning {
+    margin: 12px 0 0;
+    padding: 8px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--danger-color);
+    background: rgba(255, 77, 79, 0.1);
+    border: 1px solid rgba(255, 77, 79, 0.3);
+    border-radius: 6px;
+    flex: none;
+}
+
+/* 底部操作区：左「取消」(次要) 右「确认重置」(危险)，等宽、文字强制单行 */
+.reset-kline-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 12px;
+    flex: none;
+}
+
+/* 提升优先级以覆盖 .modal-content 下按钮的 width:100% / margin-top / 大字号 */
+.modal-content.reset-kline-content .reset-kline-actions button {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+    margin-top: 0;
+    padding: 11px 16px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+/* 破坏性主操作：红色实心，替代原紫色渐变 */
+.modal-content.reset-kline-content #confirm-reset-kline {
+    border: none;
+    background: linear-gradient(135deg, #ef4444, #d32f2f);
+    color: #fff;
+}
+
+.modal-content.reset-kline-content #confirm-reset-kline:hover:not(:disabled) {
+    transform: translateY(-1px);
+    background: linear-gradient(135deg, #f45a5a, #dc2626);
+    box-shadow: 0 4px 14px rgba(239, 68, 68, 0.35);
+}
+
+.modal-content.reset-kline-content #confirm-reset-kline:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+@media (max-width: 480px) {
+    .modal-content.reset-kline-content {
+        width: 96vw;
+        padding: 18px 16px;
+    }
+}
+
+
 /* 开局设置 */
 .setup-container {
     max-width: 500px;
@@ -1760,6 +2053,14 @@ body.festival-theme {
     font-size: 12px;
 }
 
+/* P2-4: badge for achievements that are intentionally not implemented yet. */
+.achievement-level-badge.coming-soon {
+    margin-left: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    border: 1px dashed var(--border-color);
+}
+
 .profile-actions {
     display: flex;
     gap: 15px;
@@ -2060,18 +2361,26 @@ body.festival-theme {
 .achievement-popup {
     position: fixed;
     top: 20px;
-    right: -400px;
+    /* H3 Fix: hide with transform, not a fixed right offset. The English popup is
+       wider than the 400px used before, so part of it stayed on screen and covered
+       the header settings button. translateX(100% + gap) always clears the viewport
+       regardless of the popup width, and pointer-events:none keeps the hidden popup
+       from intercepting clicks. */
+    right: 20px;
+    transform: translateX(calc(100% + 40px));
+    pointer-events: none;
     background: var(--bg-secondary);
     border-radius: 12px;
     border: 1px solid var(--primary-color);
     padding: 20px;
     z-index: 2000;
-    transition: right 0.5s ease;
+    transition: transform 0.5s ease;
     box-shadow: 0 4px 20px rgba(88, 166, 255, 0.3);
 }
 
 .achievement-popup.show {
-    right: 20px;
+    transform: translateX(0);
+    pointer-events: auto;
 }
 
 .achievement-content {

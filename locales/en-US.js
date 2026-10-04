@@ -368,7 +368,7 @@ const EN_US = {
     'debug.fundPlaceholder': 'Enter new fund',
     'debug.setFund': 'Set Fund',
     'debug.fundModified': 'Fund modified',
-    'debug.fundInvalid': 'Invalid fund: enter a value between 1 and 1000000000',
+    'debug.fundInvalid': 'Invalid fund: enter a value between 1 and {max}',
     'debug.achievementUnlock': 'Achievement Unlock',
     'debug.unlockAll': '🏆 Unlock All',
     'debug.selectAchievement': 'Unlock Single',

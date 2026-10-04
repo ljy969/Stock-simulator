@@ -142,14 +142,14 @@ function isKnownStockCode(code) {
 // list and warn before the quota is reached instead of silently losing all saves.
 const MAX_SAVES_PER_USER = 50;
 const STORAGE_WARN_BYTES = 4 * 1024 * 1024;
-// Round-3 fix: unified money ceiling for imported saves. The new-game screen caps
-// initial funds at 10000万 and the debug panel rejects funds above 10亿, but the
-// import sanitizer used to accept anything finite and non-negative - including
-// fund: 1e308, which then flowed into total-asset math and money formatting. A
-// backup claiming more than the loosest sanctioned value (10亿) is treated as
-// tampered/corrupt data and reset, mirroring how out-of-range fees / trade units
-// are already handled (reset to default instead of silently clamped).
-const MAX_SAVE_FUND = 1e9;
+// Round-3 fix: unified money ceiling for imported saves. The new-game screen only
+// caps the STARTING funds at 10000万, so a save that is played well can legitimately
+// grow past 10亿. The old 1e9 ceiling therefore treated honest exports as tampered
+// data and silently reset them to 100万 (a 25亿 save came back as 1,000,000 with a
+// fake -99% return). The ceiling now only rejects values that are impossible in real
+// play (1e15), while still stopping fund: 1e308 payloads from flowing into
+// total-asset math and money formatting.
+const MAX_SAVE_FUND = 1e15;
 
 function normalizeStockCode(value) {
     if (value === null || value === undefined) return '';
@@ -360,14 +360,16 @@ function sanitizeSaveData(raw) {
     save.id = typeof raw.id === 'string' ? raw.id : (Crypto && Crypto.uuid ? Crypto.uuid() : Date.now().toString());
     save.createdAt = typeof raw.createdAt === 'number' && isFinite(raw.createdAt) ? raw.createdAt : Date.now();
     // Round-3 fix: enforce the money ceiling on imported saves (see MAX_SAVE_FUND).
-    // fund beyond 10亿 resets to the default balance; initialFund beyond it falls
-    // back to the (already validated) fund, keeping the return-rate denominator sane.
+    // Only values past the (very loose) ceiling are rejected; a rejected fund falls
+    // back to a valid initialFund rather than 100万, so a corrupt number can no longer
+    // fabricate a -99% return on an otherwise healthy save.
+    const rawInitialFund = Number.isFinite(raw.initialFund) && raw.initialFund > 0 && raw.initialFund <= MAX_SAVE_FUND
+        ? Number(raw.initialFund) : null;
     save.fund = Number.isFinite(raw.fund) && raw.fund >= 0 && raw.fund <= MAX_SAVE_FUND
-        ? Number(raw.fund) : 1000000;
+        ? Number(raw.fund) : (rawInitialFund !== null ? rawInitialFund : 1000000);
     // P1-3b Fix: initialFund must be positive AND finite. The old Number.isFinite(0)
     // check let 0 through, making the portfolio divide by zero ("Infinity%").
-    save.initialFund = Number.isFinite(raw.initialFund) && raw.initialFund > 0 && raw.initialFund <= MAX_SAVE_FUND
-        ? Number(raw.initialFund) : save.fund;
+    save.initialFund = rawInitialFund !== null ? rawInitialFund : save.fund;
     save.name = (typeof raw.name === 'string' && raw.name.length >= 1 && raw.name.length <= 20)
         ? raw.name : '';
     // Name: restrict to safe character set (Chinese, letters, digits, limited punctuation)
@@ -415,6 +417,12 @@ function sanitizeSaveData(raw) {
         if (!Number.isFinite(quantity) || quantity < 0) return;
         if (!Number.isFinite(time)) return;
         save.records.push({
+            // #24 Fix: give every record a stable identity so multi-tab merges can tell
+            // two *distinct* trades apart even when time/code/type/quantity/price match
+            // (two identical orders in the same game minute used to collapse into one).
+            id: (typeof r.id === 'string' && r.id.length > 0 && r.id.length <= 64)
+                ? r.id
+                : ((Crypto && Crypto.uuid) ? Crypto.uuid() : 'r-' + time + '-' + Math.random().toString(36).slice(2, 10)),
             time,
             // Game-day fields (see recordTrade). Optional so exports from older builds
             // still import; calculateSaveStats() falls back to the real date when absent.
@@ -505,6 +513,10 @@ function sanitizeSaveData(raw) {
         if (!r || typeof r !== 'object') return null;
         const num = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
         return {
+            // #24 Fix: same unique identity treatment as trade records (see mergeRecordLists).
+            id: (typeof r.id === 'string' && r.id.length > 0 && r.id.length <= 64)
+                ? r.id
+                : ((Crypto && Crypto.uuid) ? Crypto.uuid() : ('a-' + (num(r.time) || Date.now()) + '-' + Math.random().toString(36).slice(2, 10))),
             time: num(r.time) || Date.now(),
             success: !!r.success,
             amount: num(r.amount),
@@ -1041,15 +1053,28 @@ class StockSimulator {
     }
 
     // Union record lists by identity, newest first, capped.
+    // #24 Fix: identity is the record's unique id. The old key was the record's *content*
+    // (time|code|type|quantity|price|pnl) and 'time' is the in-game clock rounded to the
+    // minute, so two genuinely different orders placed on the same stock, size and price
+    // in the same game minute were treated as one and silently dropped on merge.
+    // Records from older builds have no id; those fall back to the content key so a
+    // legacy record still dedupes against its counterpart from another tab.
     mergeRecordLists(baseList, localList, remoteList, cap = 100) {
-        const seen = new Set();
-        const keyOf = (r) => [r && r.time, r && r.code, r && r.type, r && r.quantity, r && r.price, r && r.pnl].join('|');
+        const seenIds = new Set();
+        const seenLegacy = new Set();
+        const contentKey = (r) => [r && r.time, r && r.code, r && r.type, r && r.quantity, r && r.price, r && r.pnl].join('|');
         const merged = [];
         [...(localList || []), ...(remoteList || [])].forEach(record => {
             if (!record || typeof record !== 'object') return;
-            const key = keyOf(record);
-            if (seen.has(key)) return;
-            seen.add(key);
+            const id = (typeof record.id === 'string' && record.id.length > 0) ? record.id : '';
+            if (id) {
+                if (seenIds.has(id)) return;
+                seenIds.add(id);
+            } else {
+                const key = contentKey(record);
+                if (seenLegacy.has(key)) return;
+                seenLegacy.add(key);
+            }
             merged.push(record);
         });
         merged.sort((a, b) => (Number(b.time) || 0) - (Number(a.time) || 0));
@@ -4761,6 +4786,8 @@ class StockSimulator {
         // are rounded to cents so records no longer carry values like 7730.83683.
         const signedAmount = type === 'buy' ? -(amount + fee) : (amount - fee);
         this.currentSave.records.unshift({
+            // #24 Fix: unique id so a multi-tab merge never collapses two identical trades.
+            id: (Crypto && Crypto.uuid) ? Crypto.uuid() : ('r-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10)),
             time: stamp.time,
             dayIndex: stamp.dayIndex,
             gameMinutes: stamp.gameMinutes,
@@ -6033,8 +6060,8 @@ class StockSimulator {
         const raw = document.getElementById('debug-fund').value;
         const parsed = Number(raw);
         if (!this.currentSave || typeof raw !== 'string' || raw.trim() === '' ||
-            !Number.isFinite(parsed) || parsed < 1 || parsed > 1e9) {
-            alert(I18n.t('debug.fundInvalid'));
+            !Number.isFinite(parsed) || parsed < 1 || parsed > MAX_SAVE_FUND) {
+            alert(I18n.t('debug.fundInvalid', { max: MAX_SAVE_FUND }));
             return;
         }
         this.currentSave.fund = round2(parsed);
@@ -7969,6 +7996,8 @@ class StockSimulator {
         const autoStamp = this.getGameTimestamp();
         const autoSignedAmount = config.direction === 'buy' ? -(amount + fee) : (amount - fee);
         this.currentSave.records.unshift({
+            // #24 Fix: unique id so a multi-tab merge never collapses two identical trades.
+            id: (Crypto && Crypto.uuid) ? Crypto.uuid() : ('r-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10)),
             time: autoStamp.time,
             dayIndex: autoStamp.dayIndex,
             gameMinutes: autoStamp.gameMinutes,
@@ -8015,6 +8044,8 @@ class StockSimulator {
 
     addAutoTradeRecord(success, amount, message, pnl = 0, config = null, holding = null, currentPrice = 0) {
         const record = {
+            // #24 Fix: unique id so a multi-tab merge never collapses two identical log lines.
+            id: (Crypto && Crypto.uuid) ? Crypto.uuid() : ('a-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10)),
             time: Date.now(),
             success,
             amount,

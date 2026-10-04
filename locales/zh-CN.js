@@ -64,9 +64,6 @@ const ZH_CN = {
     'save.limitReached': '存档数量已达上限（{max} 个），请先删除旧存档或导出备份',
     'save.capacity': '存档 {used} / {max}',
     'save.capacityWarn': '存档 {used} / {max}，存储空间接近上限，建议导出备份后删除旧存档',
-    'save.limitReached': '存档数量已达上限（{max} 个），请先删除旧存档或导出备份',
-    'save.capacity': '存档 {used} / {max}',
-    'save.capacityWarn': '存档 {used} / {max}，存储空间接近上限，建议导出备份后删除旧存档',
 
     // ==================== 修改存档名称模态框 ====================
     'rename.title': '修改存档名称',
@@ -371,7 +368,7 @@ const ZH_CN = {
     'debug.fundPlaceholder': '输入新资金',
     'debug.setFund': '设置资金',
     'debug.fundModified': '资金已修改',
-    'debug.fundInvalid': '资金无效：请输入 1 ~ 1000000000 之间的数值',
+    'debug.fundInvalid': '资金无效：请输入 1 ~ {max} 之间的数值',
     'debug.achievementUnlock': '成就解锁',
     'debug.unlockAll': '🏆 解锁全部成就',
     'debug.selectAchievement': '解锁单个成就',

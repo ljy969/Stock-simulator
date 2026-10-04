@@ -8,7 +8,7 @@
 
 A pure-entertainment, zero-stress Chinese A-share stock trading simulator platform. All data is generated and stored locally inside your browser without connecting to real market APIs. Users can learn trading rules, experience market fluctuations, and test strategies in a risk-free environment.
 
-> Version: v2.13.0
+> Version: v2.13.1
 > Updated: 2026-10
 
 ---
@@ -124,7 +124,7 @@ Stock simulator/
 ├── crypto.js               # Encryption utilities (XOR + Base64 + hashing + UUID)
 ├── i18n.js                 # Internationalization core module (I18nManager class)
 ├── locales/                # Language resource files directory
-│   ├── zh-CN.js            # Chinese language resources (572 translations)
+│   ├── zh-CN.js            # Chinese language resources (569 translations)
 │   └── en-US.js            # English language resources (569 translations)
 ├── styles.css              # All styles (including 3 themes + language switching UI)
 ├── images/                 # Project image resources
@@ -766,6 +766,12 @@ Your language preference is automatically saved and applied on your next visit.
 
 ## Changelog
 
+### v2.13.1
+
+- **Bugfix**: Fixed imported saves silently resetting funds above 1 billion yuan to 1 million. The unified money ceiling MAX_SAVE_FUND is raised from 1e9 to 1e15, so only impossible values (e.g. 1e308) are rejected; an invalid fund now falls back to a valid initialFund instead of fabricating a -99% return. The debug panel fund cap follows the same constant and the error message now receives {max} for interpolation.
+- **Bugfix**: Fixed the multi-tab merge dropping distinct trades that shared the same minute/stock/quantity/price. Trade records (manual and auto-trade log) now carry a Crypto.uuid() unique id, and mergeRecordLists deduplicates by id (legacy id-less records still fall back to a content key).
+- **Docs**: Removed 3 duplicate translation keys in zh-CN.js; both locales now report 569 entries, consistent with the README. Noted that empty/unsafe save names fall back to the "Save N" label in the save list.
+
 ### v2.13.0
 
 - **Feature Removal**: Auto trading no longer caps the trade count — both the per-stock max trade count (`maxTrades`) and the global max trade count (`maxTotalTrades`, previously default 100) are removed, along with their config fields, limit notices, and save-data fields. Auto trading is now governed only by cooldowns, stop-loss/take-profit, per-order max amount, and the consecutive-failure breaker (20 failures). Legacy `maxTrades` / `maxTotalTrades` / `stockTradeCounts` / `maxTradesNotified` fields in old saves are ignored on load; cooldowns and trade records are unaffected.
@@ -912,7 +918,7 @@ Copyright (c) 2026 MOX
 
 ---
 
-**Version**: v2.13.0
+**Version**: v2.13.1
 **Developer**: Moke Xintu (Bilibili)
 
 ---

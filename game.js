@@ -860,7 +860,23 @@ class StockSimulator {
             // stored ciphertext actually changed, so the hot auto-save path stays cheap.
             let storedRaw = null;
             try { storedRaw = localStorage.getItem('stock_simulator_users'); } catch (_) { storedRaw = null; }
-            if (storedRaw && storedRaw !== this.lastStoredCipher) {
+            // #24 Fix: never write an account back to storage after another tab deleted it.
+            // Before this guard the deleted account stayed in this tab's in-memory map and
+            // the next auto-save (or trade, or visibilitychange flush) re-created it with
+            // its password hash and every save. The disk check only runs when the stored
+            // ciphertext changed since our last read/write, so the hot auto-save path
+            // stays cheap (a save we just wrote is proof the account is still there).
+            const currentUsername = this.currentUser && this.currentUser.username;
+            if (currentUsername && (!storedRaw || storedRaw !== this.lastStoredCipher)) {
+                const storedUsers = storedRaw ? this.readStoredUsers(storedRaw) : null;
+                if (!storedUsers || !Object.prototype.hasOwnProperty.call(storedUsers, currentUsername)) {
+                    // Account deleted elsewhere (or storage cleared): end the session
+                    // instead of resurrecting it.
+                    this.onAccountRemovedExternally(storedUsers || Object.create(null), storedRaw);
+                    return false;
+                }
+                this.reconcileWithStorage(storedUsers);
+            } else if (storedRaw && storedRaw !== this.lastStoredCipher) {
                 this.reconcileWithStorage(this.readStoredUsers(storedRaw));
             }
             const cipher = Crypto.encrypt(serializeUsersData(this.users));
@@ -947,6 +963,122 @@ class StockSimulator {
             this.autoTrade.lastTradeTimes = this.currentSave.autoTrade.lastTradeTimes || {};
         }
         return changed;
+    }
+
+    // #24 Fix: single entry point for cross-tab storage events (the inline listener in
+    // bindEvents() delegates here). Handles the case the old code ignored: the shared
+    // database still exists but the account this tab is playing is no longer in it.
+    handleStorageEvent(e) {
+        if (!e || e.key !== 'stock_simulator_users') return;
+
+        // Unchanged ciphertext (e.g. an echo of a write we already know about): nothing
+        // to do. This keeps the decrypt below off the common path.
+        if (e.newValue && e.newValue === this.lastStoredCipher) return;
+
+        // A null newValue means the whole key was removed (removeItem /
+        // localStorage.clear()), which is equivalent to an empty user database.
+        const stored = e.newValue ? this.readStoredUsers(e.newValue) : Object.create(null);
+        if (!stored) return; // unreadable ciphertext: never act on it
+
+        if (!this.currentUser) {
+            // Sitting on the login / save-select screens: just mirror the database so a
+            // newly registered account appears and a deleted one disappears.
+            if (e.newValue) {
+                this.loadUsers();
+            } else {
+                this.users = Object.create(null);
+                this.lastStoredCipher = null;
+            }
+            const saveSelect = document.getElementById('save-select-screen');
+            if (saveSelect && saveSelect.classList.contains('active')) this.renderSaveList();
+            return;
+        }
+
+        // #24 Fix: the account this tab is playing no longer exists on disk. Previously
+        // the event was ignored (the key was present, just without our user), so the tab
+        // kept playing and the next auto-save wrote the account, its password hash and
+        // every save straight back into storage - deleting in one tab resurrected the
+        // account from another.
+        const username = this.currentUser.username;
+        if (!Object.prototype.hasOwnProperty.call(stored, username)) {
+            this.onAccountRemovedExternally(stored, e.newValue);
+            return;
+        }
+
+        if (e.newValue === this.lastStoredCipher) return;
+        const changed = this.reconcileWithStorage(stored);
+        // Round-3 critical fix: re-baseline the merge ancestor to the REMOTE copy
+        // that is now in storage. The old code only refreshed lastStoredCipher and
+        // left saveBaseline at the pre-merge snapshot. One player action commonly
+        // writes storage twice (the trade save plus the first-achievement save),
+        // so the second storage event three-way-merged against the stale ancestor
+        // and applied the other tab's delta a SECOND time: holdings and cash were
+        // double-counted in memory and the next save wrote the corruption back
+        // for every tab to absorb. The persisted state after this event is exactly
+        // `stored`, so that copy is the correct common ancestor for the next merge.
+        this.rebaseSaveBaseline(stored);
+        this.lastStoredCipher = e.newValue;
+        if (changed) {
+            this.showNotification(I18n.t('notification.multiTabMerged'));
+            if (this.currentSave) {
+                this.updateTradeAvailable();
+                this.updatePortfolio();
+                this.renderStockList(this.stockSearch.keyword);
+            } else {
+                const saveSelect = document.getElementById('save-select-screen');
+                if (saveSelect && saveSelect.classList.contains('active')) this.renderSaveList();
+            }
+        }
+    }
+
+    // #24 Fix: another tab deleted the account this tab was playing (detected either from
+    // a storage event or by the guard in saveUsers()). Tear the session down completely so
+    // no code path can write the account back, then return to the login screen.
+    onAccountRemovedExternally(storedUsers, storedCipher) {
+        if (!this.currentUser && !this.currentSave) return;
+
+        // Stops the market / auto-trade intervals and any pending skip chain.
+        this.teardownSession();
+
+        // Mirror what is on disk: never keep holding an account that no longer exists.
+        if (storedUsers && typeof storedUsers === 'object') {
+            this.users = Object.assign(Object.create(null), storedUsers);
+        } else {
+            this.users = Object.create(null);
+        }
+        this.currentUser = null;
+        this.currentSave = null;
+        this.currentSaveIndex = undefined;
+        this.saveBaseline = null;
+        this.lastStoredCipher = storedCipher || null;
+        this.selectedStock = null;
+        this.stockData.clear();
+        this.marketTickCount = 0;
+        this.autoTrade = {
+            enabled: false,
+            paused: false,
+            configs: [],
+            stats: { totalTrades: 0, successTrades: 0, failedTrades: 0, totalPnl: 0 },
+            records: [],
+            lastTradeTimes: {},
+            interval: null
+        };
+
+        try { localStorage.removeItem('stock_simulator_last_user'); } catch (_) { /* best-effort */ }
+
+        // Do not let the login screen inherit the deleted account's theme.
+        document.body.className = '';
+        const themeToggleEl = document.getElementById('theme-toggle');
+        if (themeToggleEl) themeToggleEl.textContent = '🌙';
+
+        this.showNotification(I18n.t('notification.accountDeletedElsewhere'));
+        this.showScreen('auth-screen');
+        const loginUsername = document.getElementById('login-username');
+        if (loginUsername) loginUsername.value = '';
+        const loginPassword = document.getElementById('login-password');
+        if (loginPassword) loginPassword.value = '';
+        const errorEl = document.getElementById('login-error');
+        if (errorEl) errorEl.textContent = '';
     }
 
     // #13 Fix: three-way merge of one save. Numeric deltas are summed on top of the
@@ -1185,41 +1317,9 @@ class StockSimulator {
         // #13 Fix: another tab wrote to the shared database. Fold its changes in instead
         // of ignoring them, otherwise the last tab to save silently wins and the other
         // tab's trades are lost on the next refresh.
-        window.addEventListener('storage', (e) => {
-            if (e.key !== 'stock_simulator_users' || !e.newValue) return;
-            if (e.newValue === this.lastStoredCipher) return;
-            if (!this.currentUser) {
-                this.loadUsers();
-                const saveSelect = document.getElementById('save-select-screen');
-                if (saveSelect && saveSelect.classList.contains('active')) this.renderSaveList();
-                return;
-            }
-            const stored = this.readStoredUsers(e.newValue);
-            if (!stored) return;
-            const changed = this.reconcileWithStorage(stored);
-            // Round-3 critical fix: re-baseline the merge ancestor to the REMOTE copy
-            // that is now in storage. The old code only refreshed lastStoredCipher and
-            // left saveBaseline at the pre-merge snapshot. One player action commonly
-            // writes storage twice (the trade save plus the first-achievement save),
-            // so the second storage event three-way-merged against the stale ancestor
-            // and applied the other tab's delta a SECOND time: holdings and cash were
-            // double-counted in memory and the next save wrote the corruption back
-            // for every tab to absorb. The persisted state after this event is exactly
-            // `stored`, so that copy is the correct common ancestor for the next merge.
-            this.rebaseSaveBaseline(stored);
-            this.lastStoredCipher = e.newValue;
-            if (changed) {
-                this.showNotification(I18n.t('notification.multiTabMerged'));
-                if (this.currentSave) {
-                    this.updateTradeAvailable();
-                    this.updatePortfolio();
-                    this.renderStockList(this.stockSearch.keyword);
-                } else {
-                    const saveSelect = document.getElementById('save-select-screen');
-                    if (saveSelect && saveSelect.classList.contains('active')) this.renderSaveList();
-                }
-            }
-        });
+        // #24 Fix: the handler was extracted into handleStorageEvent() so the
+        // account-deletion path is explicit and can be exercised by tests.
+        window.addEventListener('storage', (e) => this.handleStorageEvent(e));
 
         // 登录/注册标签切换
         document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -4325,7 +4425,7 @@ class StockSimulator {
     updateTradeAvailable() {
         if (!this.currentSave) return;
         
-        document.getElementById('buy-available').textContent = `¥${this.formatMoney(this.currentSave.fund)}`;
+        document.getElementById('buy-available').textContent = this.formatCurrency(this.currentSave.fund);
         
         // 更新持仓列表
         const holdingsList = document.getElementById('trade-holdings-list');
@@ -4344,11 +4444,11 @@ class StockSimulator {
             if (!data) return;
             const pnl = (data.price - holding.avgPrice) * holding.quantity;
             const pnlClass = pnl >= 0 ? 'up' : 'down';
-            const pnlSymbol = pnl >= 0 ? '+' : '';
             // P0-1 Fix: escape all user-controllable fields
             const codeEsc = escapeHtml(code);
             const nameEsc = escapeHtml(holding.name);
-            const pnlText = escapeHtml(this.formatMoney(pnl));
+            // P1-2b Fix: sign before the currency symbol (-¥42.33), never ¥-42.33.
+            const pnlText = escapeHtml(this.formatCurrency(pnl, true));
 
             html += `
                 <div class="holding-item" data-code="${codeEsc}">
@@ -4358,7 +4458,7 @@ class StockSimulator {
                     </div>
                     <div class="holding-qty">
                         <div class="qty">${escapeHtml(I18n.t('trade.shares', { quantity: holding.quantity }))}</div>
-                        <div class="pnl ${pnlClass}">${pnlSymbol}¥${pnlText}</div>
+                        <div class="pnl ${pnlClass}">${pnlText}</div>
                     </div>
                 </div>
             `;
@@ -4420,6 +4520,10 @@ class StockSimulator {
     // Restore a snapshot produced by cloneSaveData() for the active save slot.
     restoreSaveSnapshot(snapshot) {
         if (!snapshot) return;
+        // #24 Fix: a failed save caused by another tab deleting the account has already
+        // torn the session down. Reviving currentSave here would leave a save object with
+        // no currentUser behind the login screen.
+        if (!this.currentUser) return;
         this.currentSave = snapshot;
         if (this.currentUser && this.currentUser.username && this.users &&
             this.users[this.currentUser.username]) {
@@ -4857,12 +4961,13 @@ class StockSimulator {
             : 0;
 
         // 更新摘要
-        document.getElementById('total-assets').textContent = `¥${this.formatMoney(totalAssets)}`;
-        document.getElementById('stock-value').textContent = `¥${this.formatMoney(stockValue)}`;
-        document.getElementById('available-fund').textContent = `¥${this.formatMoney(this.currentSave.fund)}`;
-        document.getElementById('floating-pnl').textContent = `${floatingPnl >= 0 ? '+' : ''}¥${this.formatMoney(floatingPnl)}`;
+        document.getElementById('total-assets').textContent = this.formatCurrency(totalAssets);
+        document.getElementById('stock-value').textContent = this.formatCurrency(stockValue);
+        document.getElementById('available-fund').textContent = this.formatCurrency(this.currentSave.fund);
+        document.getElementById('floating-pnl').textContent = this.formatCurrency(floatingPnl, true);
         document.getElementById('floating-pnl').className = `value ${floatingPnl >= 0 ? 'up' : 'down'}`;
-        document.getElementById('total-return').textContent = `${(totalReturn * 100).toFixed(2)}%`;
+        // P1-2b Fix: (totalReturn * 100).toFixed(2) rendered a ~-0.004% return as "-0.00%".
+        document.getElementById('total-return').textContent = this.formatPercent(totalReturn * 100, false);
         document.getElementById('total-return').className = `value ${totalReturn >= 0 ? 'up' : 'down'}`;
 
         // 更新持仓明细
@@ -4889,9 +4994,9 @@ class StockSimulator {
                 const qtyEsc = escapeHtml(String(holding.quantity));
                 const avgText = escapeHtml(holding.avgPrice.toFixed(2));
                 const priceText = escapeHtml(data.price.toFixed(2));
-                const mvText = escapeHtml(this.formatMoney(marketValue));
-                const pnlText = escapeHtml(this.formatMoney(pnl));
-                const rateText = escapeHtml(pnlRate.toFixed(2));
+                const mvText = escapeHtml(this.formatCurrency(marketValue));
+                const pnlText = escapeHtml(this.formatCurrency(pnl, true));
+                const rateText = escapeHtml(this.formatPercent(pnlRate, true));
 
                 return `
                     <tr data-code="${codeEsc}" style="cursor: pointer; hover: background-color: rgba(88, 166, 255, 0.1);">
@@ -4899,9 +5004,9 @@ class StockSimulator {
                         <td>${qtyEsc}</td>
                         <td>¥${avgText}</td>
                         <td>¥${priceText}</td>
-                        <td>¥${mvText}</td>
-                        <td class="${pnlClass}">${pnl >= 0 ? '+' : ''}¥${pnlText}</td>
-                        <td class="${pnlClass}">${pnl >= 0 ? '+' : ''}${rateText}%</td>
+                        <td>${mvText}</td>
+                        <td class="${pnlClass}">${pnlText}</td>
+                        <td class="${pnlClass}">${rateText}</td>
                     </tr>
                 `;
             }).join('');
@@ -6918,26 +7023,59 @@ class StockSimulator {
         if (modal) modal.classList.remove('active');
     }
     // 工具函数（支持国际化的金额格式化）
-    formatMoney(amount) {
+    // 只格式化绝对值，符号交给调用方决定，这样负数可以写成 -¥42.33 而不是 ¥-42.33。
+    formatMoneyMagnitude(amount) {
+        const value = Number(amount);
+        const abs = Math.abs(Number.isFinite(value) ? value : 0);
         if (window.I18n && I18n.getCurrentLanguage() === 'en-US') {
-            // 英文：使用 K/M/B 体系
-            if (Math.abs(amount) >= 1000000000) {
-                return (amount / 1000000000).toFixed(2) + 'B';
-            } else if (Math.abs(amount) >= 1000000) {
-                return (amount / 1000000).toFixed(2) + 'M';
-            } else if (Math.abs(amount) >= 1000) {
-                return (amount / 1000).toFixed(2) + 'K';
-            }
-            return amount.toFixed(2);
-        } else {
-            // 中文：使用 万/亿 体系
-            if (Math.abs(amount) >= 100000000) {
-                return (amount / 100000000).toFixed(2) + '亿';
-            } else if (Math.abs(amount) >= 10000) {
-                return (amount / 10000).toFixed(2) + '万';
-            }
-            return amount.toFixed(2);
+            // 英文：使用 K/M/B/T 体系
+            if (abs >= 1000000000000) return (abs / 1000000000000).toFixed(2) + 'T';
+            if (abs >= 1000000000) return (abs / 1000000000).toFixed(2) + 'B';
+            if (abs >= 1000000) return (abs / 1000000).toFixed(2) + 'M';
+            if (abs >= 1000) return (abs / 1000).toFixed(2) + 'K';
+            return abs.toFixed(2);
         }
+        // 中文：使用 万/亿/万亿 体系
+        if (abs >= 1000000000000) return (abs / 1000000000000).toFixed(2) + '万亿';
+        if (abs >= 100000000) return (abs / 100000000).toFixed(2) + '亿';
+        if (abs >= 10000) return (abs / 10000).toFixed(2) + '万';
+        return abs.toFixed(2);
+    }
+
+    // 数值只会显示两位小数，所以 |amount| < 0.005 时会被渲染成 0.00；
+    // 这种「负零」不应再带上负号。
+    isZeroMoneyText(text) {
+        return /^0\.00/.test(text);
+    }
+
+    // 保留原有语义：返回带符号、不带货币符号的金额文本（如 "-42.33"、"1.20万"）。
+    formatMoney(amount) {
+        const value = Number(amount);
+        const safe = Number.isFinite(value) ? value : 0;
+        const magnitude = this.formatMoneyMagnitude(safe);
+        if (safe < 0 && !this.isZeroMoneyText(magnitude)) return '-' + magnitude;
+        return magnitude;
+    }
+
+    // 货币显示：符号放在货币符号之前（-¥42.33 / +¥42.33 / ¥42.33）。
+    formatCurrency(amount, showPlus = false) {
+        const value = Number(amount);
+        const safe = Number.isFinite(value) ? value : 0;
+        const magnitude = this.formatMoneyMagnitude(safe);
+        if (this.isZeroMoneyText(magnitude)) return '¥' + magnitude;
+        const sign = safe < 0 ? '-' : (showPlus ? '+' : '');
+        return sign + '¥' + magnitude;
+    }
+
+    // 百分比显示：入参已经是百分比数值（3.2 表示 3.20%）。
+    // 很小的负数四舍五入后是 0，显示 0.00% 而不是 -0.00%。
+    formatPercent(percent, showPlus = false) {
+        const value = Number(percent);
+        const safe = Number.isFinite(value) ? value : 0;
+        let text = safe.toFixed(2);
+        if (text === '-0.00') text = '0.00';
+        if (showPlus && text !== '0.00' && text.charAt(0) !== '-') text = '+' + text;
+        return text + '%';
     }
 
     showScreen(screenId) {
@@ -8132,7 +8270,7 @@ class StockSimulator {
         document.getElementById('auto-failed-trades').textContent = this.autoTrade.stats.failedTrades;
         
         const totalPnlEl = document.getElementById('auto-total-pnl');
-        totalPnlEl.textContent = `${this.autoTrade.stats.totalPnl >= 0 ? '+' : ''}¥${this.formatMoney(this.autoTrade.stats.totalPnl)}`;
+        totalPnlEl.textContent = this.formatCurrency(this.autoTrade.stats.totalPnl, true);
         totalPnlEl.className = `stat-value ${this.autoTrade.stats.totalPnl >= 0 ? 'up' : 'down'}`;
 
         const recordsList = document.getElementById('auto-trade-records-list');
@@ -8143,7 +8281,6 @@ class StockSimulator {
             recordsList.innerHTML = this.autoTrade.records.map(record => {
                 const date = new Date(record.time);
                 const pnlClass = record.pnl >= 0 ? 'up' : 'down';
-                const pnlSymbol = record.pnl >= 0 ? '+' : '';
                 // P0-1 Fix: whitelist the class suffix and escape all fields
                 const successClass = record.success ? 'success' : 'failed';
 
@@ -8157,7 +8294,7 @@ class StockSimulator {
 
                 if (record.direction === 'sell' && record.buyPrice > 0) {
                     detailsHtml += `<div class="trade-details">
-                        ${escapeHtml(I18n.t('auto.buyPriceLabel'))}: ¥${escapeHtml(Number(record.buyPrice).toFixed(2))} | ${escapeHtml(I18n.t('auto.sellPriceLabel'))}: ¥${escapeHtml(Number(record.sellPrice).toFixed(2))} | ${escapeHtml(I18n.t('auto.pnlLabel'))}: ${pnlSymbol}${escapeHtml(String(record.pnlPercent || 0))}%
+                        ${escapeHtml(I18n.t('auto.buyPriceLabel'))}: ¥${escapeHtml(Number(record.buyPrice).toFixed(2))} | ${escapeHtml(I18n.t('auto.sellPriceLabel'))}: ¥${escapeHtml(Number(record.sellPrice).toFixed(2))} | ${escapeHtml(I18n.t('auto.pnlLabel'))}: ${escapeHtml(this.formatPercent(Number(record.pnlPercent || 0), true))}
                     </div>`;
                 }
 
@@ -8170,7 +8307,10 @@ class StockSimulator {
                     detailsHtml += `<div class="condition-info">${escapeHtml(I18n.t('auto.conditionTriggerLabel'))}: ${escapeHtml(conditionText)}</div>`;
                 }
 
-                const amountText = record.pnl !== 0 ? `${pnlSymbol}¥${escapeHtml(this.formatMoney(record.pnl))}` : '--';
+                // P1-2b Fix: sign before the currency symbol; a tiny negative shows as ¥0.00.
+                const amountText = Math.abs(Number(record.pnl) || 0) >= 0.005
+                    ? escapeHtml(this.formatCurrency(record.pnl, true))
+                    : '--';
                 const statusText = record.success ? escapeHtml(I18n.t('common.statusSuccess')) : escapeHtml(I18n.t('common.statusFailed'));
 
                 return `

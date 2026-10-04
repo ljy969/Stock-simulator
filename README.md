@@ -8,7 +8,7 @@
 
 一个纯娱乐、零压力的 A 股模拟炒股平台。所有数据均在浏览器本地生成与存储，不连接任何真实行情接口，用户可在无资金风险的环境中学习股票交易规则、体验市场波动并测试自己的交易策略。
 
-> 版本：v2.13.1
+> 版本：v2.13.2
 > 更新时间：2026-10
 
 > 开发者：莫客星图（Bilibili）
@@ -126,8 +126,8 @@ Stock simulator/
 ├── crypto.js               # 加密工具（XOR + Base64 + 哈希 + UUID）
 ├── i18n.js                 # 国际化核心模块（I18nManager 类）
 ├── locales/                # 语言资源文件目录
-│   ├── zh-CN.js            # 中文语言资源（569 条翻译）
-│   └── en-US.js            # 英文语言资源（569 条翻译）
+│   ├── zh-CN.js            # 中文语言资源（570 条翻译）
+│   └── en-US.js            # 英文语言资源（570 条翻译）
 ├── styles.css              # 全部样式（含三套主题 + 语言切换 UI）
 ├── images/                 # 项目图片资源
 │   ├── cover.jpg           # 中文版封面图
@@ -247,7 +247,7 @@ Stock simulator/
 
 **自动存档**：行情与游戏时钟会随每次 market tick 自动写入 localStorage（并节流为约 2 秒一次），切换标签页（`visibilitychange`）与关闭/刷新页面（`beforeunload`）时也会立即保存；因此空转一段时间后刷新不会回退时间或价格，重开当天最后一根 K 线也与现价一致。
 
-**多标签页合并（v2.10.0）**：同一账号在两个标签页同时游玩时，`saveUsers()` 会在写入前读取磁盘上的最新密文，以「本次会话开始时的基线 / 本标签页内存中的存档 / 磁盘上的存档」做三方合并，按增量累加资金、持仓数量与成本、成交记录、当日交易计数、统计数据与自动交易冷却时间，避免后写入的标签页整体覆盖前一个标签页的进度。此外还监听 `storage` 事件，其它标签页写入后会立即提示并刷新界面。合并只累加增量、不解决同一存档内的重复操作（例如两个标签页同时卖出同一笔持仓），极端情况下数量会被夹紧到 0。
+**多标签页合并（v2.10.0）**：同一账号在两个标签页同时游玩时，`saveUsers()` 会在写入前读取磁盘上的最新密文，以「本次会话开始时的基线 / 本标签页内存中的存档 / 磁盘上的存档」做三方合并，按增量累加资金、持仓数量与成本、成交记录、当日交易计数、统计数据与自动交易冷却时间，避免后写入的标签页整体覆盖前一个标签页的进度。此外还监听 `storage` 事件：其它标签页写入后会立即提示并刷新界面；若其它窗口删除了当前账号，本标签页会立刻停止行情与自动交易定时器、清除会话并返回登录页，且不会再把它写回存储（v2.13.2）。合并只累加增量、不解决同一存档内的重复操作（例如两个标签页同时卖出同一笔持仓），极端情况下数量会被夹紧到 0。
 
 **存档操作**：创建、加载、重命名（1-20 字符）、删除、切换。导入/导出集中**在“选择存档”页**：可为任意单个存档单独导出加密文本文件，也可导出/导入备份。导出的备份不包含密码哈希。「导入单个存档」把备份中选定的一个存档追加到当前账号（自动生成新存档 id）；「导入所有数据」把备份中的全部存档合并进当前账号，与当前账号 id 相同的存档自动跳过。两种导入都不创建新账号、不修改当前账号的密码或偏好、**不需要重新登录**。导入会保留备份中的行情快照（游戏时钟、K 线、随机种子）与自动交易冷却时间/记录；单个账号存档上限 50 个，超出部分会被截断并明确提示。
 
@@ -534,7 +534,7 @@ chartState = {
 
 **本地化适配**：
 
-- 金额格式化：中文使用「万/亿」单位，英文使用「K/M/B」单位
+- 金额格式化：中文使用「万/亿/万亿」单位，英文使用「K/M/B/T」单位；负数金额的符号写在货币符号之前（-¥42.33），四舍五入后为 0 的负数不显示负号（0.00%、¥0.00）
 - 日期格式化：使用 `toLocaleString()` 根据当前语言区域格式化
 - 成就系统：成就名称与描述均支持双语切换（成就海报中的标题/名称/描述会按画布宽度自动缩放字号，避免长英文被边框裁切）
 - 页面标题：`document.title` 随语言切换同步更新
@@ -798,7 +798,7 @@ chartState = {
 
 **`LimitManager`**（[game.js:4-108](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L4-L108)）：涨跌停与熔断管理器，负责价格边界计算、熔断状态维护。
 
-**`StockSimulator`**（[game.js:551-8162](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L551-L8162)）：主控制器，单例运行于 `window.game`，包含全部业务逻辑，主要方法分组如下：
+**`StockSimulator`**（[game.js:563-8333](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L563-L8333)）：主控制器，单例运行于 `window.game`，包含全部业务逻辑，主要方法分组如下：
 
 | 模块 | 主要方法 |
 | --- | --- |
@@ -815,11 +815,11 @@ chartState = {
 | 调试面板 | `showDebugPanel`、`debugSetTime`、`debugSetFund`、`debugUnlockAchievement`、`debugResetMarket` |
 | 教程系统 | `startTutorial`、`showTutorialStep`、`nextTutorial`、`endTutorial` |
 | 国际化 | `applyUserLanguage`、`onLanguageChanged`、`toggleLanguage` |
-| 工具方法 | `formatMoney`、`showScreen`、`switchTab`、`setTheme`、`exportAllData`、`exportSingleSave`、`importSave` |
+| 工具方法 | `formatMoney`、`formatCurrency`、`formatPercent`、`showScreen`、`switchTab`、`setTheme`、`exportAllData`、`exportSingleSave`、`importSave` |
 
 ### 启动流程
 
-应用启动逻辑位于 [game.js:8165-8187](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L8165-L8187)：
+应用启动逻辑位于 [game.js:8336-8358](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L8336-L8358)：
 
 1. `DOMContentLoaded` 事件触发
 2. 全局禁用右键菜单
@@ -916,7 +916,7 @@ Copyright (c) 2026 MOX
 
 ---
 
-**版本信息**：v2.13.1
+**版本信息**：v2.13.2
 **开发人员**：莫客星图
 
 ---

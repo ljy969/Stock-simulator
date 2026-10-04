@@ -452,6 +452,7 @@ const EN_US = {
     'notification.importFailed': 'Import failed: invalid file format',
     'notification.importTooLarge': 'Import file too large; maximum is 5MB',
     'notification.multiTabMerged': 'Changes from another tab were merged automatically',
+    'notification.accountDeletedElsewhere': 'This account was deleted in another tab; you have been signed out',
     'notification.importNoSaves': 'This backup file contains no save to import',
     'notification.importSingleSuccess': 'Save "{name}" imported',
     'notification.importAllConfirm': 'Import {count} save(s) from the backup into the current account "{username}"?',

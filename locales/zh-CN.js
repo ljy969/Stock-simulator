@@ -452,6 +452,7 @@ const ZH_CN = {
     'notification.importFailed': '导入失败：文件格式错误',
     'notification.importTooLarge': '导入文件过大，最大支持 5MB',
     'notification.multiTabMerged': '检测到另一个标签页的改动，已自动合并',
+    'notification.accountDeletedElsewhere': '该账号已在其他窗口被删除，已退出到登录页',
     'notification.importNoSaves': '该备份文件中没有可导入的存档',
     'notification.importSingleSuccess': '存档“{name}”已导入',
     'notification.importAllConfirm': '将备份中的 {count} 个存档导入当前账号“{username}”？',

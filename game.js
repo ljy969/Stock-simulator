@@ -142,6 +142,14 @@ function isKnownStockCode(code) {
 // list and warn before the quota is reached instead of silently losing all saves.
 const MAX_SAVES_PER_USER = 50;
 const STORAGE_WARN_BYTES = 4 * 1024 * 1024;
+// Round-3 fix: unified money ceiling for imported saves. The new-game screen caps
+// initial funds at 10000万 and the debug panel rejects funds above 10亿, but the
+// import sanitizer used to accept anything finite and non-negative - including
+// fund: 1e308, which then flowed into total-asset math and money formatting. A
+// backup claiming more than the loosest sanctioned value (10亿) is treated as
+// tampered/corrupt data and reset, mirroring how out-of-range fees / trade units
+// are already handled (reset to default instead of silently clamped).
+const MAX_SAVE_FUND = 1e9;
 
 function normalizeStockCode(value) {
     if (value === null || value === undefined) return '';
@@ -351,10 +359,15 @@ function sanitizeSaveData(raw) {
     const save = {};
     save.id = typeof raw.id === 'string' ? raw.id : (Crypto && Crypto.uuid ? Crypto.uuid() : Date.now().toString());
     save.createdAt = typeof raw.createdAt === 'number' && isFinite(raw.createdAt) ? raw.createdAt : Date.now();
-    save.fund = Number.isFinite(raw.fund) && raw.fund >= 0 ? Number(raw.fund) : 1000000;
+    // Round-3 fix: enforce the money ceiling on imported saves (see MAX_SAVE_FUND).
+    // fund beyond 10亿 resets to the default balance; initialFund beyond it falls
+    // back to the (already validated) fund, keeping the return-rate denominator sane.
+    save.fund = Number.isFinite(raw.fund) && raw.fund >= 0 && raw.fund <= MAX_SAVE_FUND
+        ? Number(raw.fund) : 1000000;
     // P1-3b Fix: initialFund must be positive AND finite. The old Number.isFinite(0)
     // check let 0 through, making the portfolio divide by zero ("Infinity%").
-    save.initialFund = Number.isFinite(raw.initialFund) && raw.initialFund > 0 ? Number(raw.initialFund) : save.fund;
+    save.initialFund = Number.isFinite(raw.initialFund) && raw.initialFund > 0 && raw.initialFund <= MAX_SAVE_FUND
+        ? Number(raw.initialFund) : save.fund;
     save.name = (typeof raw.name === 'string' && raw.name.length >= 1 && raw.name.length <= 20)
         ? raw.name : '';
     // Name: restrict to safe character set (Chinese, letters, digits, limited punctuation)
@@ -1069,6 +1082,28 @@ class StockSimulator {
         this.saveBaseline = this.currentSave ? this.cloneSaveData(this.currentSave) : null;
     }
 
+    // Round-3 critical fix: after folding a remote write into memory, what is actually
+    // PERSISTED is still the remote copy, not our merged in-memory state. Point the
+    // merge baseline at a clone of that remote save so the next three-way merge diffs
+    // both tabs' changes against the true common ancestor. Without this, consecutive
+    // remote writes (a trade save followed by an achievement save) were each merged on
+    // top of the same stale baseline, so the remote delta was counted twice - holdings
+    // and cash doubled and the corruption was then written back to storage.
+    // The remote save comes from JSON, so sectorsTraded arrives as an array;
+    // mergeSaveData() only ever spreads it into a Set, which accepts arrays fine.
+    rebaseSaveBaseline(stored) {
+        if (!stored || !this.currentSave || typeof this.currentSave.id !== 'string') return;
+        const username = this.currentUser && this.currentUser.username;
+        if (!username || !Object.prototype.hasOwnProperty.call(stored, username)) return;
+        const remote = stored[username];
+        if (!remote || !Array.isArray(remote.saves)) return;
+        const remoteSave = remote.saves.find(s => s && typeof s.id === 'string' && s.id === this.currentSave.id);
+        // The other tab deleted the active save: keep the local copy (and the existing
+        // baseline) - reconcileWithStorage() already treats deletion as "not seen yet".
+        if (!remoteSave) return;
+        this.saveBaseline = this.cloneSaveData(remoteSave);
+    }
+
     // Bug fix: persist the live market + game clock on a cadence so idle play is not
     // lost on refresh (previously everything was only written on trade/rename/...), and
     // also when the tab is hidden or the page is about to unload.
@@ -1156,8 +1191,19 @@ class StockSimulator {
             }
             const stored = this.readStoredUsers(e.newValue);
             if (!stored) return;
-            if (this.reconcileWithStorage(stored)) {
-                this.lastStoredCipher = e.newValue;
+            const changed = this.reconcileWithStorage(stored);
+            // Round-3 critical fix: re-baseline the merge ancestor to the REMOTE copy
+            // that is now in storage. The old code only refreshed lastStoredCipher and
+            // left saveBaseline at the pre-merge snapshot. One player action commonly
+            // writes storage twice (the trade save plus the first-achievement save),
+            // so the second storage event three-way-merged against the stale ancestor
+            // and applied the other tab's delta a SECOND time: holdings and cash were
+            // double-counted in memory and the next save wrote the corruption back
+            // for every tab to absorb. The persisted state after this event is exactly
+            // `stored`, so that copy is the correct common ancestor for the next merge.
+            this.rebaseSaveBaseline(stored);
+            this.lastStoredCipher = e.newValue;
+            if (changed) {
                 this.showNotification(I18n.t('notification.multiTabMerged'));
                 if (this.currentSave) {
                     this.updateTradeAvailable();
@@ -3492,6 +3538,15 @@ class StockSimulator {
             const input = document.getElementById(id);
             if (input) input.value = '';
         });
+        // Round-3 fix: the success path used to close the modal without clearing a
+        // previously shown error (e.g. "当前密码错误"), leaving the stale red message
+        // attached to the (now reset) form. Clear it on every close so the modal is
+        // always pristine when it is reopened.
+        const errorEl = document.getElementById('change-password-error');
+        if (errorEl) {
+            errorEl.textContent = '';
+            errorEl.style.display = 'none';
+        }
     }
 
     // 修改密码
@@ -3561,6 +3616,12 @@ class StockSimulator {
 
         // 保存到本地存储
         this.saveUsers();
+
+        // Round-3 fix: clear any error left over from a previous failed attempt
+        // before reporting success and closing the modal (hideChangePasswordModal()
+        // now also clears it, this keeps the success path explicit).
+        errorEl.textContent = '';
+        errorEl.style.display = 'none';
 
         // 显示成功提示
         this.showNotification(I18n.t('password.success'));
@@ -4132,6 +4193,9 @@ class StockSimulator {
                 if (this.selectedStock) {
                     const data = this.stockData.get(this.selectedStock.code);
                     this.drawKLine(data);
+                    // P2-10 Fix: keep the volume chart in sync with the K-line chart
+                    // during touch drag, matching the mouse drag handler.
+                    this.drawVolume(data);
                 }
             }
         } else if (e.touches.length === 2) {
@@ -4148,6 +4212,9 @@ class StockSimulator {
             if (this.selectedStock) {
                 const data = this.stockData.get(this.selectedStock.code);
                 this.drawKLine(data);
+                // P2-10 Fix: keep the volume chart in sync with the K-line chart
+                // during touch pinch zoom, matching the mouse zoom handler.
+                this.drawVolume(data);
             }
         }
     }
@@ -5410,6 +5477,10 @@ class StockSimulator {
             }
 
             // 夜猫子：在收盘前5分钟完成交易
+            // Design note (round 3): the inclusive upper bound (15:00 exactly) is
+            // unreachable now that trading sessions are left-closed/right-open, so it
+            // is dead code for new records. It is intentionally kept so legacy saves
+            // that legitimately traded at 15:00 (before the boundary fix) still count.
             // P2-4 Fix: the old window (11:35-11:40) is outside every trading session
             // (the morning close is 11:30), so executeTrade() always rejected it and the
             // achievement was mathematically unreachable. Use the real close window.
@@ -5910,10 +5981,20 @@ class StockSimulator {
             return;
         }
         
-        const hour = parseInt(hourInput.value);
-        const minute = parseInt(minuteInput.value);
-        
-        if (isNaN(hour) || isNaN(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+        // Round-3 fix: parseInt() silently truncated decimals, so typing "9.5" and
+        // "30.7" was accepted as 09:30 with no warning. Parse with Number() and
+        // require true integers (and non-empty fields) so fractional input is
+        // rejected with the invalid-time message instead of being quietly floored.
+        // Note Number('') === 0, so empty fields must be rejected explicitly.
+        const hourRaw = hourInput.value;
+        const minuteRaw = minuteInput.value;
+        const hour = Number(hourRaw);
+        const minute = Number(minuteRaw);
+
+        if (typeof hourRaw !== 'string' || hourRaw.trim() === '' ||
+            typeof minuteRaw !== 'string' || minuteRaw.trim() === '' ||
+            !Number.isInteger(hour) || !Number.isInteger(minute) ||
+            hour < 0 || hour > 23 || minute < 0 || minute > 59) {
             alert(I18n.t('debug.invalidTime'));
             return;
         }

@@ -8,7 +8,7 @@
 
 A pure-entertainment, zero-stress Chinese A-share stock trading simulator platform. All data is generated and stored locally inside your browser without connecting to real market APIs. Users can learn trading rules, experience market fluctuations, and test strategies in a risk-free environment.
 
-> Version: v2.12.0
+> Version: v2.12.1
 > Updated: 2026-10
 
 ---
@@ -46,6 +46,7 @@ A pure-entertainment, zero-stress Chinese A-share stock trading simulator platfo
 - [Trading Rules](#trading-rules)
 - [UI Navigation Guide](#ui-navigation-guide)
 - [Frequently Asked Questions](#frequently-asked-questions)
+- [Changelog](#changelog)
 - [Developer Information](#developer-information)
 - [Future Roadmap](#future-roadmap)
 - [Contact & Credits](#contact--credits)
@@ -766,6 +767,21 @@ Your language preference is automatically saved and applied on your next visit.
 
 ---
 
+## Changelog
+
+### v2.12.1
+
+- **P2-10 Fix**: Fixed volume chart not refreshing after box zoom. All zoom operations (wheel, mouse box selection, touch) now synchronize K-line and volume chart updates.
+- **P2-11 Fix**: Fixed NaN poisoning of `scaleX` caused by zero starting distance when two fingers land on the same pixel during touch pinch zoom. Invalid zoom calculations are now safely skipped.
+- **P2-10 Fix**: Fixed volume chart not syncing during touch drag and pinch zoom by adding `drawVolume` calls in touch operations, matching mouse behavior.
+- **P2-12 Fix**: Fixed volume chart not refreshing during touch drag operations.
+
+### v2.12.0
+
+- Initial release version with complete stock simulation functionality.
+
+---
+
 ## Developer Information
 
 ### Core Class Design
@@ -894,7 +910,7 @@ Copyright (c) 2026 MOX
 
 ---
 
-**Version**: v2.12.0
+**Version**: v2.12.1
 **Developer**: Moke Xintu (Bilibili)
 
 ---

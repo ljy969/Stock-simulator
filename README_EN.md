@@ -8,7 +8,7 @@
 
 A pure-entertainment, zero-stress Chinese A-share stock trading simulator platform. All data is generated and stored locally inside your browser without connecting to real market APIs. Users can learn trading rules, experience market fluctuations, and test strategies in a risk-free environment.
 
-> Version: v2.12.1
+> Version: v2.13.0
 > Updated: 2026-10
 
 ---
@@ -116,7 +116,7 @@ Positioned as a "pure entertainment" tool, it involves no real capital. All mark
 ```
 Stock simulator/
 ├── index.html              # Main page containing all UI structure
-├── game.js                 # Core game logic (6000+ lines)
+├── game.js                 # Core game logic (8000+ lines)
 │   ├── LimitManager class           # Price limit and circuit breaker management
 │   └── StockSimulator class         # Main controller containing all business logic
 ├── stockData.js            # A-share stock pool data (387 stocks)
@@ -124,8 +124,8 @@ Stock simulator/
 ├── crypto.js               # Encryption utilities (XOR + Base64 + hashing + UUID)
 ├── i18n.js                 # Internationalization core module (I18nManager class)
 ├── locales/                # Language resource files directory
-│   ├── zh-CN.js            # Chinese language resources (564 translations)
-│   └── en-US.js            # English language resources (564 translations)
+│   ├── zh-CN.js            # Chinese language resources (572 translations)
+│   └── en-US.js            # English language resources (569 translations)
 ├── styles.css              # All styles (including 3 themes + language switching UI)
 ├── images/                 # Project image resources
 │   ├── cover.jpg           # Chinese version cover image
@@ -200,7 +200,7 @@ All user data is stored in the browser's LocalStorage under the key `stock_simul
 - Remember last user: records the most recent username after a successful login and prefills it next time (the password is never stored, so you still sign in manually)
 - Change Password: Requires verification of current password, new password requires confirmation
 - Delete Account: Requires typing `DELETE` to confirm; operation is irreversible
-- Data Migration: Old user data is automatically completed with missing fields (`tutorialCompleted`, `theme`, `refreshRate`, `lang`) on load
+- Data Migration: Old user data is automatically completed with missing fields (`tutorialCompleted`, `theme`, `refreshRate`) on load
 
 ### Save System
 
@@ -212,7 +212,7 @@ Each user can create multiple independent saves. Data between saves is completel
 {
   id: String,                    // UUID
   createdAt: Number,             // Creation timestamp
-  fund: Number,                  // Current available funds (cents)
+  fund: Number,                  // Current available funds (yuan)
   initialFund: Number,           // Initial capital
   holdings: Object,              // Holdings dictionary, keyed by stock code
   records: Array,                // Trade records (with game dayIndex / game clock, up to 100 retained)
@@ -245,9 +245,9 @@ Each user can create multiple independent saves. Data between saves is completel
 
 **Auto-save**: The market and the game clock are written to localStorage on every market tick (throttled to roughly once every 2 seconds), and also immediately when the tab is hidden (`visibilitychange`) or the page is closed/reloaded (`beforeunload`). Idling and then refreshing therefore no longer rewinds time or prices, and the last candle of the day matches the live price.
 
-**Multi-tab Merge (v2.10.0)**: When the same account is played in two tabs at once, `saveUsers()` reads the latest ciphertext from storage before writing and performs a three-way merge ("baseline when this session loaded" / "this tab's in-memory save" / "the save on disk"), adding deltas for funds, holding quantity and cost, trade records, daily trade counters, statistics, and auto-trade counters, so the tab that writes last no longer overwrites the other tab's progress. A `storage` event listener also notifies and refreshes the UI when another tab writes. The merge only sums deltas and does not resolve the same action performed twice inside one save (for example selling the same position in both tabs); in extreme cases a quantity is clamped to 0.
+**Multi-tab Merge (v2.10.0)**: When the same account is played in two tabs at once, `saveUsers()` reads the latest ciphertext from storage before writing and performs a three-way merge ("baseline when this session loaded" / "this tab's in-memory save" / "the save on disk"), adding deltas for funds, holding quantity and cost, trade records, daily trade counters, statistics, and auto-trade cooldowns, so the tab that writes last no longer overwrites the other tab's progress. A `storage` event listener also notifies and refreshes the UI when another tab writes. The merge only sums deltas and does not resolve the same action performed twice inside one save (for example selling the same position in both tabs); in extreme cases a quantity is clamped to 0.
 
-**Save Operations**: Create, load, rename (1-20 characters), delete, switch. Import/export live on the **save-selection screen**: export any single save as an encrypted text file, or export/import a backup. Exported backups carry no password hash. **Import a Save** appends one chosen save (a fresh id is assigned) into the current account; **Import All Data** merges every save in the backup into the current account, automatically skipping saves whose id already exists. Neither import creates a new account, changes the current password or preferences, or requires re-login. Imports keep the backup's market snapshot (game clock, K-lines, random seed) and auto-trade counters/records; each account holds at most 50 saves, and any excess is truncated with an explicit notice.
+**Save Operations**: Create, load, rename (1-20 characters), delete, switch. Import/export live on the **save-selection screen**: export any single save as an encrypted text file, or export/import a backup. Exported backups carry no password hash. **Import a Save** appends one chosen save (a fresh id is assigned) into the current account; **Import All Data** merges every save in the backup into the current account, automatically skipping saves whose id already exists. Neither import creates a new account, changes the current password or preferences, or requires re-login. Imports keep the backup's market snapshot (game clock, K-lines, random seed) and auto-trade cooldowns/records; each account holds at most 50 saves, and any excess is truncated with an explicit notice.
 
 ### Market Simulation System
 
@@ -342,9 +342,7 @@ Automated trading is an advanced feature that allows users to configure automate
 | Trade Price | Market price or Limit price |
 | Stop-loss Amount | Auto-sell when loss reaches threshold (leave blank to disable) |
 | Take-profit Amount | Auto-sell when profit reaches threshold |
-| Max Trade Count | Maximum auto-trade count per stock |
 | Max Trade Amount | Maximum trade amount per order |
-| Global Max Trades | Cumulative trade limit for the whole auto-trade run (default 100, editable on the Risk Control tab) |
 
 **Parameter Validation**: Trade quantity must be a positive integer no larger than 1,000,000,000 and a multiple of the trade unit; the profit target and take-profit amount must be positive; an empty optional risk-control field means "no limit". The full-position shortcut (manual and auto) reserves the buy fee.
 
@@ -355,13 +353,13 @@ Automated trading is an advanced feature that allows users to configure automate
 - **Profit Target**: Only applies to selling; triggers when profit/loss amount based on holding cost reaches the set value
 - **Time Interval**: Automatically triggers every 30 seconds (not constrained by condition values)
 
-**Cooldown Mechanism**: To prevent repeated trades, each stock has a cooldown period after each trigger. Default is 5 seconds; 30 seconds in interval mode. Cooldowns and per-stock max trade counts are persisted with the save: pausing, resuming, or switching saves never resets them, and only "Stop" clears them.
+**Cooldown Mechanism**: To prevent repeated trades, each stock has a cooldown period after each trigger. Default is 5 seconds; 30 seconds in interval mode. Cooldowns are persisted with the save: pausing, resuming, or switching saves never resets them, and only "Stop" clears them.
 
-**Risk Control**: In addition to basic trigger conditions, sell operations also check stop-loss and take-profit. When the profit/loss amount reaches the stop-loss threshold (negative) or take-profit threshold (positive), a sell is automatically triggered. Only successful fills consume the global trade quota, while 20 consecutive failures trip a breaker that pauses auto trading and shows a notice (the status indicator refreshes immediately after pausing, and the breaker count resets on resume). A configuration reaching its own max trade count is treated as completed: it is logged once, does not feed the failure breaker, and does not affect other configurations; editing that configuration or stopping auto trading re-arms the notice. Once the global trade limit is reached, the status indicator switches to "Trade limit reached" and a notice appears once instead of failing silently.
+**Risk Control**: In addition to basic trigger conditions, sell operations also check stop-loss and take-profit. When the profit/loss amount reaches the stop-loss threshold (negative) or take-profit threshold (positive), a sell is automatically triggered. 20 consecutive failures trip a breaker that pauses auto trading and shows a notice (the status indicator refreshes immediately after pausing, and the breaker count resets on resume), preventing a never-satisfiable condition from spinning forever.
 
-**Statistics and Records**: Automated trading maintains its own statistics (total trades, success/failure count, total P&L, remaining quota) and trade records (up to 50). You can view them on the "Trade Records" tab. Auto-trade buys also count toward save statistics (trade count, sector coverage, and max holdings), so holding-based achievements can be unlocked normally.
+**Statistics and Records**: Automated trading maintains its own statistics (total trades, success/failure count, total P&L) and trade records (up to 50). You can view them on the "Trade Records" tab. Auto-trade buys also count toward save statistics (trade count, sector coverage, and max holdings), so holding-based achievements can be unlocked normally.
 
-**Operations**: Add, edit, delete single configurations, one-click reset all configurations, configure the global trade limit, start, pause, and stop automated trading. Pausing game time freezes both the market and auto trading, so no trades execute on the real clock.
+**Operations**: Add, edit, delete single configurations, one-click reset all configurations, start, pause, and stop automated trading. Pausing game time freezes both the market and auto trading, so no trades execute on the real clock.
 
 ### Achievement System
 
@@ -572,7 +570,7 @@ The tutorial is presented by highlighting target elements, floating tooltips, an
 - **User data schema validation** (rejects malformed JSON, incorrect field types)
 - **Per-save field whitelist** (save name limited to Chinese/letters/numbers/common symbols, 1-20 characters; `tradeUnit` only accepts `{1, 100}`; `buyFee`/`sellFee` limited to `[0, 0.01]`)
 - **Merge limit**: a single backup contributes at most 50 saves; any excess is truncated with a notice
-- **Full state preserved**: the market snapshot (game clock, K-lines, random seed), auto-trade counters (per-stock trade count / last trigger time), and auto-trade records are all restored on import
+- **Full state preserved**: the market snapshot (game clock, K-lines, random seed), auto-trade cooldowns (per-stock last trigger time), and auto-trade records are all restored on import
 - **All user-controllable strings are HTML-escaped before rendering** to prevent script injection via malicious save names
 - **Merge into current account**: both imports only append/merge saves into the currently signed-in account (saves with existing ids are skipped); no new account is created, the current password/preferences stay untouched, and no re-login is needed
 
@@ -681,9 +679,9 @@ The top navigation bar contains five main pages:
 
 - Three tabs: trigger conditions, risk control, trading records
 - Trigger conditions: stock list + add stock form
-- Risk control: stop loss, take profit, per-stock max trade count, max trade amount per order, global max trades
-- Trading records: auto-trading history and statistics (including remaining quota)
-- Top status indicator: not started / running / paused / trade limit reached
+- Risk control: stop loss, take profit, max trade amount per order
+- Trading records: auto-trading history and statistics
+- Top status indicator: not started / running / paused
 
 #### Portfolio Page (portfolio-page)
 
@@ -748,7 +746,6 @@ Possible reasons include:
 - The market was not in a trading session
 - The cooldown period had not expired (default 5s; 30s in interval mode)
 - The trigger condition was not met
-- The stock reached its maximum allowed trade count, or the global max trade limit was reached
 - Available funds or holdings were insufficient
 - Game time is paused (both the market and auto trading are frozen)
 
@@ -769,6 +766,11 @@ Your language preference is automatically saved and applied on your next visit.
 
 ## Changelog
 
+### v2.13.0
+
+- **Feature Removal**: Auto trading no longer caps the trade count — both the per-stock max trade count (`maxTrades`) and the global max trade count (`maxTotalTrades`, previously default 100) are removed, along with their config fields, limit notices, and save-data fields. Auto trading is now governed only by cooldowns, stop-loss/take-profit, per-order max amount, and the consecutive-failure breaker (20 failures). Legacy `maxTrades` / `maxTotalTrades` / `stockTradeCounts` / `maxTradesNotified` fields in old saves are ignored on load; cooldowns and trade records are unaffected.
+- **Docs**: fixed stale line-number references in the developer notes, locale key counts, and save-data field comments.
+
 ### v2.12.1
 
 - **P2-10 Fix**: Fixed volume chart not refreshing after box zoom. All zoom operations (wheel, mouse box selection, touch) now synchronize K-line and volume chart updates.
@@ -788,9 +790,9 @@ Your language preference is automatically saved and applied on your next visit.
 
 The project is centered around two core classes:
 
-**`LimitManager`** ([game.js:4-104](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L4-L104)): manages price limits and circuit breakers, calculates price boundaries, and tracks breaker states.
+**`LimitManager`** ([game.js:4-108](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L4-L108)): manages price limits and circuit breakers, calculates price boundaries, and tracks breaker states.
 
-**`StockSimulator`** ([game.js:424-7151](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L424-L7151)): the main controller running as the singleton `window.game`, containing the complete business logic. The main method groups are as follows:
+**`StockSimulator`** ([game.js:551-8162](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L551-L8162)): the main controller running as the singleton `window.game`, containing the complete business logic. The main method groups are as follows:
 
 | Module | Main Methods |
 | --- | --- |
@@ -811,7 +813,7 @@ The project is centered around two core classes:
 
 ### Startup Flow
 
-The application startup logic is located in [game.js:7154-7176](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L7154-L7176):
+The application startup logic is located in [game.js:8165-8187](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L8165-L8187):
 
 1. `DOMContentLoaded` event fires
 2. Right-click menu is disabled globally
@@ -838,7 +840,7 @@ User action → Event listener → StockSimulator method
 
 **Add a new achievement**: append a new object to the `achievements` array in [achievements.js](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/achievements.js), including fields like `id`, `name`, `desc`, `level`, `icon`, and `condition`. Add corresponding stats in `calculateSaveStats()`.
 
-**Modify price limit rules**: adjust the `LimitManager` constructor parameters in [game.js:5-9](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L5-L9) for `limitUpPercent`, `limitDownPercent`, `circuitBreakerThreshold`, and `circuitBreakerCooldown`.
+**Modify price limit rules**: adjust the `LimitManager` constructor parameters in [game.js:5-20](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L5-L20) for `limitUpPercent`, `limitDownPercent`, `circuitBreakerThreshold`, and `circuitBreakerCooldown`.
 
 **Add a new theme**: create a new selector in [styles.css](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/styles.css), such as `body.{theme-name}-theme`, and update the theme dropdown in [index.html](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/index.html) and the `setTheme()` logic in [game.js](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js).
 
@@ -910,7 +912,7 @@ Copyright (c) 2026 MOX
 
 ---
 
-**Version**: v2.12.1
+**Version**: v2.13.0
 **Developer**: Moke Xintu (Bilibili)
 
 ---

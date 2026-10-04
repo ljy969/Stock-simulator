@@ -493,15 +493,14 @@ function sanitizeSaveData(raw) {
             limitPrice: Number.isFinite(Number(c.limitPrice)) && Number(c.limitPrice) > 0 ? Number(c.limitPrice) : 0,
             stopLoss: Number.isFinite(Number(c.stopLoss)) ? Number(c.stopLoss) : 0,
             takeProfit: Number.isFinite(Number(c.takeProfit)) && Number(c.takeProfit) > 0 ? Number(c.takeProfit) : 0,
-            maxTrades: Number.isFinite(Number(c.maxTrades)) && Number(c.maxTrades) > 0 ? Math.floor(Number(c.maxTrades)) : 0,
             maxAmount: Number.isFinite(Number(c.maxAmount)) && Number(c.maxAmount) > 0 ? Number(c.maxAmount) : 0,
             createdAt: Number.isFinite(Number(c.createdAt)) ? Number(c.createdAt) : Date.now()
         });
     });
     const rawAutoStats = (rawAuto.stats && typeof rawAuto.stats === 'object') ? rawAuto.stats : {};
     const rawTotalPnl = rawAutoStats.totalPnl !== undefined ? rawAutoStats.totalPnl : rawAutoStats.totalProfit;
-    // #14 Fix: keep the auto-trade history and per-stock counters. Dropping them let a
-    // user reset the "max trades per stock" risk control by exporting and re-importing.
+    // #14 Fix: keep the auto-trade history. Dropping it on export/import would lose
+    // the trade log, so it is always rebuilt from the raw data.
     const autoRecords = (Array.isArray(rawAuto.records) ? rawAuto.records : []).slice(0, 50).map(r => {
         if (!r || typeof r !== 'object') return null;
         const num = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
@@ -532,8 +531,6 @@ function sanitizeSaveData(raw) {
         }
         return out;
     };
-    const autoCounts = readFloatMap(rawAuto.stockTradeCounts);
-    Object.keys(autoCounts).forEach(k => { autoCounts[k] = Math.floor(autoCounts[k]); });
     const autoTimes = readFloatMap(rawAuto.lastTradeTimes);
     save.autoTrade = {
         enabled: !!rawAuto.enabled,
@@ -546,9 +543,7 @@ function sanitizeSaveData(raw) {
             totalPnl: Number.isFinite(Number(rawTotalPnl)) ? Number(rawTotalPnl) : 0
         },
         records: autoRecords,
-        stockTradeCounts: autoCounts,
-        lastTradeTimes: autoTimes,
-        maxTotalTrades: Number.isFinite(Number(rawAuto.maxTotalTrades)) && Number(rawAuto.maxTotalTrades) > 0 ? Math.floor(Number(rawAuto.maxTotalTrades)) : 100
+        lastTradeTimes: autoTimes
     };
     return save;
 }
@@ -640,13 +635,9 @@ class StockSimulator {
             records: [],
             interval: null,
             lastTradeTimes: {},  // 每只股票的上次交易时间，防止重复交易
-            stockTradeCounts: {},  // 每只股票的交易次数
-            maxTradesNotified: {},  // 已提示“达到单股最大交易次数”的配置（code-direction）
-            maxTotalTrades: 100,  // 全局交易次数上限（可在风险控制页配置）
-            limitNotified: false,  // 触顶提示是否已弹出
-            // P2-6 Fix: failed attempts must not consume the shared maxTotalTrades
-            // quota. A misconfigured condition would otherwise burn the quota in
-            // minutes. Consecutive failures instead trip a separate circuit breaker.
+            // P2-6 Fix: a misconfigured condition that never fires would otherwise
+            // keep producing failure records forever. Consecutive failures instead
+            // trip a separate circuit breaker.
             consecutiveFailures: 0,
             maxConsecutiveFailures: 20,
             editingIndex: null  // 当前正在编辑的配置索引
@@ -941,7 +932,6 @@ class StockSimulator {
             this.autoTrade.configs = this.currentSave.autoTrade.configs || [];
             this.autoTrade.stats = this.currentSave.autoTrade.stats || this.autoTrade.stats;
             this.autoTrade.records = this.currentSave.autoTrade.records || [];
-            this.autoTrade.stockTradeCounts = this.currentSave.autoTrade.stockTradeCounts || {};
             this.autoTrade.lastTradeTimes = this.currentSave.autoTrade.lastTradeTimes || {};
         }
         return changed;
@@ -1012,7 +1002,7 @@ class StockSimulator {
             realizedLoss: Math.max(0, round2(delta('realizedLoss')))
         };
 
-        // Auto-trade: runtime flags follow the live tab, configs/counters are merged.
+        // Auto-trade: runtime flags follow the live tab, configs and cooldowns are merged.
         const baseAuto = base.autoTrade || {}, localAuto = local.autoTrade || {}, remoteAuto = remote.autoTrade || {};
         const configs = [];
         const seenConfigs = new Set();
@@ -1022,14 +1012,6 @@ class StockSimulator {
             if (seenConfigs.has(key)) return;
             seenConfigs.add(key);
             configs.push(cfg);
-        });
-        const baseCounts = baseAuto.stockTradeCounts || {};
-        const mergedCounts = Object.assign({}, baseCounts);
-        [localAuto.stockTradeCounts, remoteAuto.stockTradeCounts].forEach(map => {
-            Object.entries(map || {}).forEach(([key, value]) => {
-                const b = asNumber(baseCounts[key]);
-                mergedCounts[key] = Math.max(0, Math.round(b + (asNumber(value) - b)));
-            });
         });
         const mergedTimes = Object.assign({}, baseAuto.lastTradeTimes || {});
         [localAuto.lastTradeTimes, remoteAuto.lastTradeTimes].forEach(map => {
@@ -1053,9 +1035,7 @@ class StockSimulator {
                 totalPnl: round2(asNumber(baseAutoStats.totalPnl) + (asNumber(localAutoStats.totalPnl) - asNumber(baseAutoStats.totalPnl)) + (asNumber(remoteAutoStats.totalPnl) - asNumber(baseAutoStats.totalPnl)))
             },
             records: this.mergeRecordLists(baseAuto.records, localAuto.records, remoteAuto.records, 50),
-            stockTradeCounts: mergedCounts,
-            lastTradeTimes: mergedTimes,
-            maxTotalTrades: asNumber(localAuto.maxTotalTrades) || asNumber(remoteAuto.maxTotalTrades) || 100
+            lastTradeTimes: mergedTimes
         };
         return merged;
     }
@@ -1467,8 +1447,6 @@ class StockSimulator {
         document.getElementById('stop-auto-trade-btn').addEventListener('click', () => this.stopAutoTrade());
         document.getElementById('add-auto-stock-btn').addEventListener('click', () => this.addAutoTradeStock());
         document.getElementById('reset-auto-trade-config-btn').addEventListener('click', () => this.resetAutoTradeConfig());
-        // P2 Fix: 全局交易次数上限改为可配置
-        document.getElementById('auto-max-total-trades').addEventListener('change', (e) => this.setAutoTradeMaxTotal(e.target.value));
 
         // 存档操作（导入/导出入口集中在选择存档页）
         document.getElementById('import-single-save-btn').addEventListener('click', () => this.importSave('single'));
@@ -1914,11 +1892,7 @@ class StockSimulator {
                 totalPnl: 0
             },
             records: [],
-            stockTradeCounts: {},
             lastTradeTimes: {},
-            maxTradesNotified: {},
-            maxTotalTrades: 100,
-            limitNotified: false,
             interval: null
         };
         
@@ -2199,9 +2173,7 @@ class StockSimulator {
                     totalPnl: 0
                 },
                 records: [],
-                stockTradeCounts: {},
-                lastTradeTimes: {},
-                maxTotalTrades: 100
+                lastTradeTimes: {}
             }
         };
 
@@ -2321,14 +2293,9 @@ class StockSimulator {
                 totalPnl: savedStats.totalPnl || savedStats.totalProfit || 0
             };
             this.autoTrade.records = this.currentSave.autoTrade.records || [];
-            // P1 Fix: 风控计数器属于自动交易运行期状态，必须随存档恢复，
-            // 否则切换存档即可把 maxTrades / 冷却时间清零绕过风控。
-            this.autoTrade.stockTradeCounts = this.currentSave.autoTrade.stockTradeCounts || {};
+            // P1 Fix: 冷却时间属于自动交易运行期状态，必须随存档恢复，
+            // 否则切换存档即可把冷却时间清零、立即重复触发交易。
             this.autoTrade.lastTradeTimes = this.currentSave.autoTrade.lastTradeTimes || {};
-            this.autoTrade.maxTotalTrades = this.currentSave.autoTrade.maxTotalTrades || 100;
-            // 单股“已达最大交易次数”的提示标记同样随存档恢复，避免上一存档的
-            // 标记泄漏到本存档、抑制本存档配置的首次提示。
-            this.autoTrade.maxTradesNotified = this.currentSave.autoTrade.maxTradesNotified || {};
             
             // 加载自动交易状态
             this.autoTrade.enabled = this.currentSave.autoTrade.enabled || false;
@@ -2400,7 +2367,6 @@ class StockSimulator {
         this.renderAutoTradeStockList();
         this.updateAutoTradeStatus();
         this.updateAutoTradeStats();
-        this.syncAutoTradeMaxTotalInput();
         
         // 初始化交易方向触发条件类型选项
         const defaultDirection = document.querySelector('input[name="auto-direction"]:checked');
@@ -7102,7 +7068,6 @@ class StockSimulator {
         const limitPriceRaw = document.getElementById('auto-limit-price').value;
         const stopLossRaw = document.getElementById('auto-stop-loss').value;
         const takeProfitRaw = document.getElementById('auto-take-profit').value;
-        const maxTradesRaw = document.getElementById('auto-max-trades').value;
         const maxAmountRaw = document.getElementById('auto-max-amount').value;
         // Bug fix: parse every numeric field with Number() instead of parseInt/parseFloat.
         // parseInt silently turned "1.9", "1e3" and "1e20" into 1; blank fields became NaN
@@ -7112,7 +7077,6 @@ class StockSimulator {
         const limitPrice = Number(limitPriceRaw);
         const stopLoss = Number(stopLossRaw);
         const takeProfit = Number(takeProfitRaw);
-        const maxTrades = Number(maxTradesRaw);
         const maxAmount = Number(maxAmountRaw);
         const isBlankInput = (raw) => typeof raw !== 'string' || raw.trim() === '';
 
@@ -7196,10 +7160,6 @@ class StockSimulator {
             alert(I18n.t('auto.invalidTakeProfit'));
             return;
         }
-        if (!isBlankInput(maxTradesRaw) && (!Number.isInteger(maxTrades) || maxTrades <= 0 || maxTrades > 1e6)) {
-            alert(I18n.t('auto.invalidMaxTrades'));
-            return;
-        }
         if (!isBlankInput(maxAmountRaw) && (!Number.isFinite(maxAmount) || maxAmount <= 0)) {
             alert(I18n.t('auto.invalidMaxAmount'));
             return;
@@ -7220,20 +7180,11 @@ class StockSimulator {
                 : 0,
             stopLoss: isBlankInput(stopLossRaw) ? 0 : stopLoss,
             takeProfit: isBlankInput(takeProfitRaw) ? 0 : takeProfit,
-            maxTrades: isBlankInput(maxTradesRaw) ? 0 : Math.floor(maxTrades),
             maxAmount: isBlankInput(maxAmountRaw) ? 0 : maxAmount,
             createdAt: isEditing ? this.autoTrade.configs[editingIndex].createdAt : Date.now()
         };
 
         if (isEditing) {
-            // 编辑配置：清除该配置“已达最大交易次数”的提示标记（例如用户上调了
-            // maxTrades，达到新上限时应能再次提示）；旧代码/方向的标记一并清除。
-            if (!this.autoTrade.maxTradesNotified) this.autoTrade.maxTradesNotified = {};
-            const prevConfig = this.autoTrade.configs[editingIndex];
-            if (prevConfig) {
-                delete this.autoTrade.maxTradesNotified[prevConfig.code + '-' + prevConfig.direction];
-            }
-            delete this.autoTrade.maxTradesNotified[config.code + '-' + config.direction];
             // 更新原有配置
             this.autoTrade.configs[editingIndex] = config;
             this.showNotification(I18n.t('auto.configUpdated'));
@@ -7267,7 +7218,6 @@ class StockSimulator {
         // 清空风险控制参数
         document.getElementById('auto-stop-loss').value = '';
         document.getElementById('auto-take-profit').value = '';
-        document.getElementById('auto-max-trades').value = '';
         document.getElementById('auto-max-amount').value = '';
     }
 
@@ -7293,11 +7243,6 @@ class StockSimulator {
             this.autoTrade.editingIndex--;
         }
 
-        // 清除被删配置的“已达最大交易次数”提示标记
-        const removedConfig = this.autoTrade.configs[index];
-        if (removedConfig && this.autoTrade.maxTradesNotified) {
-            delete this.autoTrade.maxTradesNotified[removedConfig.code + '-' + removedConfig.direction];
-        }
         this.autoTrade.configs.splice(index, 1);
         this.renderAutoTradeStockList();
         this.saveAutoTradeState();
@@ -7334,7 +7279,6 @@ class StockSimulator {
         // 设置风险控制参数
         document.getElementById('auto-stop-loss').value = config.stopLoss || '';
         document.getElementById('auto-take-profit').value = config.takeProfit || '';
-        document.getElementById('auto-max-trades').value = config.maxTrades || '';
         document.getElementById('auto-max-amount').value = config.maxAmount || '';
         
         // 保存编辑状态，但不从列表中移除
@@ -7388,17 +7332,14 @@ class StockSimulator {
             };
         }
         
-        // 保存配置到当前存档（含风控计数器与全局交易上限）
+        // 保存配置到当前存档（含冷却时间等运行期状态）
         this.currentSave.autoTrade = {
             enabled: this.autoTrade.enabled,
             paused: this.autoTrade.paused,
             configs: this.autoTrade.configs,
             stats: this.autoTrade.stats,
             records: this.autoTrade.records,
-            stockTradeCounts: this.autoTrade.stockTradeCounts,
-            lastTradeTimes: this.autoTrade.lastTradeTimes,
-            maxTradesNotified: this.autoTrade.maxTradesNotified || {},
-            maxTotalTrades: this.autoTrade.maxTotalTrades
+            lastTradeTimes: this.autoTrade.lastTradeTimes
         };
         
         // 同步到用户数据
@@ -7443,12 +7384,8 @@ class StockSimulator {
             totalPnl: 0
         };
         this.autoTrade.records = this.currentSave.autoTrade.records || [];
-        // P1 Fix: 与 loadSave 保持一致，从存档恢复风控计数器
-        this.autoTrade.stockTradeCounts = this.currentSave.autoTrade.stockTradeCounts || {};
+        // P1 Fix: 与 loadSave 保持一致，从存档恢复冷却时间
         this.autoTrade.lastTradeTimes = this.currentSave.autoTrade.lastTradeTimes || {};
-        this.autoTrade.maxTradesNotified = this.currentSave.autoTrade.maxTradesNotified || {};
-        this.autoTrade.maxTotalTrades = this.currentSave.autoTrade.maxTotalTrades || 100;
-        this.syncAutoTradeMaxTotalInput();
         
         return true;
     }
@@ -7479,11 +7416,7 @@ class StockSimulator {
             totalPnl: 0
         };
         this.autoTrade.records = [];
-        this.autoTrade.stockTradeCounts = {};
         this.autoTrade.lastTradeTimes = {};
-        this.autoTrade.maxTradesNotified = {};
-        this.autoTrade.maxTotalTrades = 100;
-        this.autoTrade.limitNotified = false;
         this.autoTrade.editingIndex = null;
         
         // 保存到存档
@@ -7498,10 +7431,7 @@ class StockSimulator {
                 totalPnl: 0
             },
             records: [],
-            stockTradeCounts: {},
-            lastTradeTimes: {},
-            maxTradesNotified: {},
-            maxTotalTrades: 100
+            lastTradeTimes: {}
         };
         
         // 同步到用户数据
@@ -7511,7 +7441,6 @@ class StockSimulator {
         // 更新界面
         this.renderAutoTradeStockList();
         this.updateAutoTradeStatus();
-        this.syncAutoTradeMaxTotalInput();
         
         this.showNotification(I18n.t('auto.configReset'));
         return true;
@@ -7581,24 +7510,6 @@ class StockSimulator {
         return `${I18n.t(typeMap[config.conditionType])}${I18n.t(operatorMap[config.conditionOperator])}${config.conditionValue}${config.conditionType === 'percentage' ? '%' : I18n.t('auto.unitYuan')}`;
     }
 
-    // 设置全局最大交易次数（可配置），并同步到存档
-    setAutoTradeMaxTotal(value) {
-        const parsed = parseInt(value, 10);
-        this.autoTrade.maxTotalTrades = Number.isFinite(parsed) && parsed > 0 ? parsed : 100;
-        this.autoTrade.limitNotified = false;
-        this.saveAutoTradeState();
-        this.updateAutoTradeStatus();
-        this.updateAutoTradeStats();
-    }
-
-    // 将内存中的全局上限回填到输入框
-    syncAutoTradeMaxTotalInput() {
-        const input = document.getElementById('auto-max-total-trades');
-        if (input) {
-            input.value = this.autoTrade.maxTotalTrades || 100;
-        }
-    }
-
     startAutoTrade() {
         const code = document.getElementById('auto-code').value;
         // 检查是否有股票配置
@@ -7613,10 +7524,8 @@ class StockSimulator {
 
         this.autoTrade.enabled = true;
         this.autoTrade.paused = false;
-        // P1 Fix: 不再在“启动”时清零风控计数器；真正的停止（stopAutoTrade）才代表本轮结束。
-        this.autoTrade.limitNotified = false;
-        // 启动=新一轮运行：清零熔断计数（风控计数器 stockTradeCounts/lastTradeTimes
-        // 仍保留，见上），否则上一轮残留的失败计数会让本轮很快再次自动暂停。
+        // 启动=新一轮运行：清零熔断计数（冷却时间 lastTradeTimes 仍保留，
+        // 见 stopAutoTrade），否则上一轮残留的失败计数会让本轮很快再次自动暂停。
         this.autoTrade.consecutiveFailures = 0;
         // P1-8 Fix: clear any pre-existing interval before starting a new one.
         if (this.autoTrade.interval) {
@@ -7633,10 +7542,7 @@ class StockSimulator {
                 configs: this.autoTrade.configs,
                 stats: this.autoTrade.stats,
                 records: this.autoTrade.records,
-                stockTradeCounts: this.autoTrade.stockTradeCounts,
-                lastTradeTimes: this.autoTrade.lastTradeTimes,
-                maxTradesNotified: this.autoTrade.maxTradesNotified || {},
-                maxTotalTrades: this.autoTrade.maxTotalTrades
+                lastTradeTimes: this.autoTrade.lastTradeTimes
             };
             this.saveUsers();
         }
@@ -7650,11 +7556,11 @@ class StockSimulator {
         
         this.autoTrade.paused = !this.autoTrade.paused;
         
-        // 如果从暂停恢复，仅重新启动定时器；风控计数器必须保留，
-        // 否则“暂停→继续”即可清零 maxTrades 与冷却时间。
+        // 如果从暂停恢复，仅重新启动定时器；冷却时间必须保留，
+        // 否则“暂停→继续”即可清零冷却时间、立即重复触发交易。
         if (!this.autoTrade.paused) {
             // Bug fix: 恢复运行时重置“连续失败”熔断计数（这是熔断器状态，不是
-            // maxTrades/冷却时间那类风控计数器）。不重置的话，恢复后下一次失败
+            // 冷却时间那类运行期计数器）。不重置的话，恢复后下一次失败
             // 就会立刻再次触发自动暂停。
             this.autoTrade.consecutiveFailures = 0;
             // 重新启动定时器（如果不存在）
@@ -7679,15 +7585,11 @@ class StockSimulator {
                     configs: this.autoTrade.configs,
                     stats: this.autoTrade.stats,
                     records: this.autoTrade.records,
-                    stockTradeCounts: this.autoTrade.stockTradeCounts,
-                    lastTradeTimes: this.autoTrade.lastTradeTimes,
-                    maxTotalTrades: this.autoTrade.maxTotalTrades
+                    lastTradeTimes: this.autoTrade.lastTradeTimes
                 };
             } else {
                 this.currentSave.autoTrade.paused = this.autoTrade.paused;
-                this.currentSave.autoTrade.stockTradeCounts = this.autoTrade.stockTradeCounts;
                 this.currentSave.autoTrade.lastTradeTimes = this.autoTrade.lastTradeTimes;
-                this.currentSave.autoTrade.maxTotalTrades = this.autoTrade.maxTotalTrades;
             }
             this.saveUsers();
         }
@@ -7710,11 +7612,8 @@ class StockSimulator {
 
         this.autoTrade.enabled = false;
         this.autoTrade.paused = false;
-        // 真正的停止才清零风控计数器（暂停/继续、加载存档都不应清零）
+        // 真正的停止才清零冷却时间（暂停/继续、加载存档都不应清零）
         this.autoTrade.lastTradeTimes = {};
-        this.autoTrade.stockTradeCounts = {};
-        this.autoTrade.maxTradesNotified = {};
-        this.autoTrade.limitNotified = false;
         
         // 保存自动交易状态到存档（保留配置）
         this.saveAutoTradeState();
@@ -7852,25 +7751,6 @@ class StockSimulator {
         // 更新该股票的上次交易时间
         const tradeKey = config.code + '-' + config.direction;
         this.autoTrade.lastTradeTimes[tradeKey] = Date.now();
-        
-        // 检查该股票的最大交易次数
-        const stockTradeKey = config.code + '-' + config.direction;
-        const stockTradeCount = this.autoTrade.stockTradeCounts[stockTradeKey] || 0;
-        
-        if (config.maxTrades && stockTradeCount >= config.maxTrades) {
-            // Bug fix: 达到单股最大交易次数意味着“该配置已完成”，不是交易失败。
-            // 此前每次条件命中都会记一条失败记录：既不断挤占 50 条历史列表，
-            // 又把“连续失败 20 次”熔断器喂满，导致整个自动交易被自动暂停、
-            // 连累其他股票的配置。现在只在首次触达时记录一次（不计入失败
-            // 熔断），后续检查静默跳过；编辑该配置或停止自动交易时恢复提示。
-            if (!this.autoTrade.maxTradesNotified) this.autoTrade.maxTradesNotified = {};
-            if (!this.autoTrade.maxTradesNotified[stockTradeKey]) {
-                this.autoTrade.maxTradesNotified[stockTradeKey] = true;
-                debugLog(`配置已完成: ${config.name} 已达到最大交易次数 ${config.maxTrades}`);
-                this.addAutoTradeRecord(false, 0, I18n.t('auto.maxTradesReached', { max: config.maxTrades }), 0, config, null, 0, { countFailure: false });
-            }
-            return;
-        }
 
         const data = this.stockData.get(config.code);
         if (!data) {
@@ -7968,22 +7848,6 @@ class StockSimulator {
             return;
         }
 
-        // 检查全局交易次数限制
-        const totalTrades = this.autoTrade.stats.totalTrades || 0;
-        const maxTotal = this.autoTrade.maxTotalTrades || 100;
-        if (totalTrades >= maxTotal) {
-            debugLog(`交易失败: 超过全局最大交易次数限制 ${maxTotal}`);
-            this.addAutoTradeRecord(false, 0, I18n.t('auto.exceedMaxTotalTrades', { max: maxTotal }), 0, config);
-            // P2 Fix: 触顶不再静默失败——主动提示一次并刷新状态指示器，
-            // 避免界面长期误显示“运行中”。
-            if (!this.autoTrade.limitNotified) {
-                this.autoTrade.limitNotified = true;
-                this.showNotification(I18n.t('auto.limitReachedNotice', { max: maxTotal }), 'warning');
-                this.updateAutoTradeStatus();
-            }
-            return;
-        }
-
         // 更新上次交易时间
         this.autoTrade.lastTradeTime = Date.now();
 
@@ -8026,10 +7890,6 @@ class StockSimulator {
             this.currentSave.dayTrades[config.code].buy += config.quantity;
 
             this.addAutoTradeRecord(true, -totalCost, I18n.t('auto.buySuccess'), 0, config);
-
-            // 增加该股票的交易次数
-            const stockTradeKey = config.code + '-' + config.direction;
-            this.autoTrade.stockTradeCounts[stockTradeKey] = (this.autoTrade.stockTradeCounts[stockTradeKey] || 0) + 1;
 
             // P0-2 Fix: use cached Map instead of O(n) find for every auto-trade tick
             const stock = this._stockPoolByCode && this._stockPoolByCode.get(config.code);
@@ -8084,10 +7944,6 @@ class StockSimulator {
             this.currentSave.dayTrades[config.code].sell += config.quantity;
 
             this.addAutoTradeRecord(true, totalIncome, I18n.t('auto.sellSuccess'), pnl, config, holding, price);
-            
-            // 增加该股票的交易次数
-            const stockTradeKey = config.code + '-' + config.direction;
-            this.autoTrade.stockTradeCounts[stockTradeKey] = (this.autoTrade.stockTradeCounts[stockTradeKey] || 0) + 1;
             
             this.currentSave.gameStats.tradeCount++;
             // Bug fix: 盈亏恰好为 0 的卖出既不算盈利也不算亏损（与手动交易一致）
@@ -8157,10 +8013,7 @@ class StockSimulator {
         }));
     }
 
-    addAutoTradeRecord(success, amount, message, pnl = 0, config = null, holding = null, currentPrice = 0, options = {}) {
-        // countFailure=false marks a "no-fault" outcome (e.g. a config that reached its
-        // max trade count): it is logged, but it must not feed the failure breaker.
-        const countFailure = options.countFailure !== false;
+    addAutoTradeRecord(success, amount, message, pnl = 0, config = null, holding = null, currentPrice = 0) {
         const record = {
             time: Date.now(),
             success,
@@ -8183,16 +8036,14 @@ class StockSimulator {
             this.autoTrade.records = this.autoTrade.records.slice(0, 50);
         }
 
-        // P2-6 Fix: only a successful trade consumes the shared maxTotalTrades quota.
-        // Previously *every* failed condition check incremented totalTrades, so a
-        // never-satisfiable condition burned the whole quota within minutes. Failures
-        // now feed a separate consecutive-failure breaker instead.
+        // P2-6 Fix: only a successful trade increments totalTrades; failures feed a
+        // separate consecutive-failure breaker instead.
         if (success) {
             this.autoTrade.stats.totalTrades = (this.autoTrade.stats.totalTrades || 0) + 1;
             this.autoTrade.stats.successTrades++;
             this.autoTrade.stats.totalPnl += pnl;
             this.autoTrade.consecutiveFailures = 0;
-        } else if (countFailure) {
+        } else {
             this.autoTrade.stats.failedTrades++;
             this.autoTrade.consecutiveFailures = (this.autoTrade.consecutiveFailures || 0) + 1;
             const maxFailures = this.autoTrade.maxConsecutiveFailures || 20;
@@ -8227,14 +8078,6 @@ class StockSimulator {
             startBtn.disabled = false;
             pauseBtn.disabled = true;
             stopBtn.disabled = true;
-        } else if ((this.autoTrade.stats.totalTrades || 0) >= (this.autoTrade.maxTotalTrades || 100)) {
-            // P2 Fix: 触顶是独立的运行状态，不能继续显示“运行中”
-            statusText.textContent = I18n.t('auto.statusLimitReached');
-            statusIndicator.className = 'status-indicator limit';
-            startBtn.disabled = true;
-            pauseBtn.disabled = false;
-            pauseBtn.textContent = I18n.t(this.autoTrade.paused ? 'auto.resume' : 'auto.pause');
-            stopBtn.disabled = false;
         } else if (this.autoTrade.paused) {
             statusText.textContent = I18n.t('auto.statusPaused');
             statusIndicator.className = 'status-indicator paused';
@@ -8256,14 +8099,6 @@ class StockSimulator {
         document.getElementById('auto-total-trades').textContent = this.autoTrade.stats.totalTrades;
         document.getElementById('auto-success-trades').textContent = this.autoTrade.stats.successTrades;
         document.getElementById('auto-failed-trades').textContent = this.autoTrade.stats.failedTrades;
-        
-        // P2 Fix: 展示全局交易上限的剩余额度，让硬编码上限变得可见
-        const maxTotal = this.autoTrade.maxTotalTrades || 100;
-        const remaining = Math.max(0, maxTotal - (this.autoTrade.stats.totalTrades || 0));
-        const remainingEl = document.getElementById('auto-remaining-trades');
-        if (remainingEl) {
-            remainingEl.textContent = `${remaining} / ${maxTotal}`;
-        }
         
         const totalPnlEl = document.getElementById('auto-total-pnl');
         totalPnlEl.textContent = `${this.autoTrade.stats.totalPnl >= 0 ? '+' : ''}¥${this.formatMoney(this.autoTrade.stats.totalPnl)}`;

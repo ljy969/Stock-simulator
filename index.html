@@ -431,19 +431,9 @@
                                 <small class="form-hint" data-i18n="auto.takeProfitHint">盈利金额达到该值时卖出，留空则不设置</small>
                             </div>
                             <div class="form-row">
-                                <label data-i18n="auto.maxTrades">最大交易次数</label>
-                                <input type="number" id="auto-max-trades" min="1" placeholder="输入最大次数" data-i18n-placeholder="auto.maxTradesPlaceholder">
-                                <small class="form-hint" data-i18n="auto.maxTradesHint">留空则不限制</small>
-                            </div>
-                            <div class="form-row">
                                 <label data-i18n="auto.maxAmount">单次最大金额</label>
                                 <input type="number" id="auto-max-amount" min="1000" step="1000" placeholder="输入金额" data-i18n-placeholder="auto.maxAmountPlaceholder">
                                 <small class="form-hint" data-i18n="auto.maxAmountHint">留空则不限制</small>
-                            </div>
-                            <div class="form-row">
-                                <label data-i18n="auto.maxTotalTrades">全局最大交易次数</label>
-                                <input type="number" id="auto-max-total-trades" min="1" placeholder="输入全局上限" data-i18n-placeholder="auto.maxTotalTradesPlaceholder">
-                                <small class="form-hint" data-i18n="auto.maxTotalTradesHint">默认 100；达到上限后自动交易将停止成交并提示</small>
                             </div>
                             <div class="form-row warning-row">
                                 <label class="warning-label" data-i18n="auto.warningTitle">⚠️ 风险提示</label>
@@ -468,10 +458,6 @@
                                 <div class="stat-item">
                                     <span class="stat-label" data-i18n="auto.statTotalPnl">总盈亏</span>
                                     <span id="auto-total-pnl" class="stat-value">¥0</span>
-                                </div>
-                                <div class="stat-item">
-                                    <span class="stat-label" data-i18n="auto.statRemainingTrades">剩余额度</span>
-                                    <span id="auto-remaining-trades" class="stat-value">100 / 100</span>
                                 </div>
                             </div>
                             <div class="auto-trade-records">

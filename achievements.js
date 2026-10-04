@@ -8,32 +8,32 @@ const AchievementSystem = {
         { id: 'first_loss', name: '交学费了', desc: '首次亏损', level: 'bronze', icon: '📉', condition: (stats) => stats.totalLoss > 0 },
         { id: 'hold_5', name: '分散投资', desc: '同时持有5只股票', level: 'bronze', icon: '📊', condition: (stats) => stats.maxHoldings >= 5 },
         { id: 'trade_10', name: '活跃交易者', desc: '累计交易10次', level: 'bronze', icon: '🔥', condition: (stats) => stats.tradeCount >= 10 },
-        { id: 'profit_1k', name: '千元户', desc: '累计盈利1000元', level: 'bronze', icon: '💵', condition: (stats) => stats.totalProfit >= 1000 },
+        { id: 'profit_1k', name: '千元户', desc: '累计净盈利1000元', level: 'bronze', icon: '💵', condition: (stats) => stats.netProfit >= 1000 },
         { id: 'day_trader', name: '日内交易', desc: '同一天买入并卖出', level: 'bronze', icon: '⚡', condition: (stats) => stats.dayTrades >= 1 },
         { id: 'watchlist_10', name: '自选股达人', desc: '添加10只股票到自选', level: 'bronze', icon: '⭐', condition: (stats) => stats.watchlistCount >= 10 },
         
         // 白银级 - 进阶成就
-        { id: 'profit_10k', name: '万元户', desc: '累计盈利1万元', level: 'silver', icon: '💎', condition: (stats) => stats.totalProfit >= 10000 },
+        { id: 'profit_10k', name: '万元户', desc: '累计净盈利1万元', level: 'silver', icon: '💎', condition: (stats) => stats.netProfit >= 10000 },
         { id: 'trade_50', name: '交易老手', desc: '累计交易50次', level: 'silver', icon: '📈', condition: (stats) => stats.tradeCount >= 50 },
         { id: 'hold_10', name: '投资组合', desc: '同时持有10只股票', level: 'silver', icon: '📁', condition: (stats) => stats.maxHoldings >= 10 },
         { id: 'return_10', name: '收益率10%', desc: '单局收益率超过10%', level: 'silver', icon: '🚀', condition: (stats) => stats.maxReturn >= 0.10 },
         { id: 'profit_streak_3', name: '三连盈', desc: '连续3笔交易盈利', level: 'silver', icon: '🏃', condition: (stats) => stats.profitStreak >= 3 },
-        { id: 'all_sectors', name: '行业通', desc: '交易过5个不同行业', level: 'silver', icon: '🏭', condition: (stats) => stats.sectorsTraded >= 5 },
+        { id: 'all_sectors', name: '行业通', desc: '交易过15个不同行业', level: 'silver', icon: '🏭', condition: (stats) => stats.sectorsTraded >= 15 },
         { id: 'large_trade', name: '大单交易', desc: '单笔交易金额超过10万', level: 'silver', icon: '💼', condition: (stats) => stats.largeTrades >= 1 },
         { id: 'maotai_holder', name: '茅台股东', desc: '持有过贵州茅台', level: 'silver', icon: '🍶', condition: (stats) => stats.holdMaotai },
         
         // 黄金级 - 高手成就
-        { id: 'profit_100k', name: '十万元户', desc: '累计盈利10万元', level: 'gold', icon: '👑', condition: (stats) => stats.totalProfit >= 100000 },
+        { id: 'profit_100k', name: '十万元户', desc: '累计净盈利10万元', level: 'gold', icon: '👑', condition: (stats) => stats.netProfit >= 100000 },
         { id: 'return_50', name: '收益率50%', desc: '单局收益率超过50%', level: 'gold', icon: '🦄', condition: (stats) => stats.maxReturn >= 0.50 },
         { id: 'trade_200', name: '交易大师', desc: '累计交易200次', level: 'gold', icon: '🎯', condition: (stats) => stats.tradeCount >= 200 },
         { id: 'profit_streak_10', name: '十连盈', desc: '连续10笔交易盈利', level: 'gold', icon: '🔥', condition: (stats) => stats.profitStreak >= 10 },
         { id: 'double_bagger', name: '翻倍股', desc: '单只股票盈利翻倍', level: 'gold', icon: '📊', condition: (stats) => stats.doubleBaggers >= 1 },
         { id: 'market_beater', name: '跑赢大盘', desc: '收益率超过同期上证指数50%', level: 'gold', icon: '🏆', condition: (stats) => stats.beatMarket, comingSoon: true },
-        { id: 'diversified', name: '全能选手', desc: '交易过10个不同行业', level: 'gold', icon: '🌍', condition: (stats) => stats.sectorsTraded >= 10 },
+        { id: 'diversified', name: '全能选手', desc: '交易过40个不同行业', level: 'gold', icon: '🌍', condition: (stats) => stats.sectorsTraded >= 40 },
         { id: 'day_trader_pro', name: '日内高手', desc: '完成20次日内交易', level: 'gold', icon: '⚡', condition: (stats) => stats.dayTrades >= 20 },
         
         // 传说级 - 大神成就
-        { id: 'profit_1m', name: '百万富翁', desc: '累计盈利100万元', level: 'legend', icon: '🏰', condition: (stats) => stats.totalProfit >= 1000000 },
+        { id: 'profit_1m', name: '百万富翁', desc: '累计净盈利100万元', level: 'legend', icon: '🏰', condition: (stats) => stats.netProfit >= 1000000 },
         { id: 'return_100', name: '翻倍大神', desc: '单局收益率超过100%', level: 'legend', icon: '🐉', condition: (stats) => stats.maxReturn >= 1.00 },
         { id: 'trade_1000', name: '千次交易', desc: '累计交易1000次', level: 'legend', icon: '⚔️', condition: (stats) => stats.tradeCount >= 1000 },
         { id: 'perfect_game', name: '完美一局', desc: '单局所有交易均盈利', level: 'legend', icon: '💎', condition: (stats) => stats.perfectGame },
@@ -54,7 +54,7 @@ const AchievementSystem = {
         { id: 'lucky_star', name: '幸运星', desc: '买入后股价立即涨停', level: 'silver', icon: '🍀', condition: (stats) => stats.luckyTrades >= 1 },
         { id: 'unlucky_star', name: '倒霉蛋', desc: '买入后股价立即跌停', level: 'bronze', icon: '🌧️', condition: (stats) => stats.unluckyTrades >= 1 },
         { id: 'weekend_warrior', name: '周末战士', desc: '周五买入周一卖出', level: 'bronze', icon: '📆', condition: (stats) => stats.weekendTrades >= 1 },
-        { id: 'round_number', name: '强迫症', desc: '买卖价格均为整数', level: 'bronze', icon: '🔢', condition: (stats) => stats.roundNumberTrades >= 1 },
+        { id: 'round_number', name: '强迫症', desc: '同一只股票的买卖价格均为整数', level: 'bronze', icon: '🔢', condition: (stats) => stats.roundNumberTrades >= 1 },
         { id: 'palindrome_profit', name: '对称美学', desc: '盈利金额是回文数(如1221)', level: 'silver', icon: '🎨', condition: (stats) => stats.palindromeProfit },
         { id: 'tax_payer', name: '纳税大户', desc: '累计缴纳手续费超过1万元', level: 'silver', icon: '🏛️', condition: (stats) => stats.totalFees >= 10000 },
         { id: 'market_crash_survivor', name: '股灾幸存者', desc: '单日亏损超过10%但未清仓', level: 'gold', icon: '🛡️', condition: (stats) => stats.crashSurvivor, comingSoon: true },
@@ -63,7 +63,7 @@ const AchievementSystem = {
         { id: 'value_investor', name: '价值投资者', desc: '持有单只股票盈利超过100%', level: 'gold', icon: '📚', condition: (stats) => stats.valueInvestor },
         { id: 'technical_trader', name: '技术派', desc: '根据K线形态交易盈利10次', level: 'silver', icon: '📐', condition: (stats) => stats.technicalWins >= 10, comingSoon: true },
         { id: 'news_trader', name: '消息派', desc: '在"利好消息"后买入并盈利', level: 'bronze', icon: '📰', condition: (stats) => stats.newsTrades >= 1, comingSoon: true },
-        { id: 'early_bird', name: '早起的鸟儿', desc: '在开盘前5分钟完成交易', level: 'bronze', icon: '🐦', condition: (stats) => stats.earlyTrades >= 1 },
+        { id: 'early_bird', name: '早起的鸟儿', desc: '在开盘后5分钟内完成交易', level: 'bronze', icon: '🐦', condition: (stats) => stats.earlyTrades >= 1 },
         { id: 'night_owl', name: '夜猫子', desc: '在收盘前5分钟完成交易', level: 'bronze', icon: '🦉', condition: (stats) => stats.lateTrades >= 1 },
     ],
 
@@ -120,6 +120,22 @@ const AchievementSystem = {
         return newAchievements;
     },
 
+    // Bug fix (#19): draw text at the requested size, shrinking it until it fits the
+    // given width. The English "🏆 Achievement Unlocked" title measured 602px on a
+    // 600px canvas (inner frame 560px) and was clipped by the border.
+    drawFittedText(ctx, text, x, y, maxWidth, size, options = {}) {
+        const weight = options.bold ? 'bold ' : '';
+        const family = options.family || 'Arial';
+        let current = size;
+        const min = options.min || 14;
+        ctx.font = weight + current + 'px ' + family;
+        while (current > min && ctx.measureText(text).width > maxWidth) {
+            current -= 1;
+            ctx.font = weight + current + 'px ' + family;
+        }
+        ctx.fillText(text, x, y);
+    },
+
     // 生成成就海报
     generatePoster(achievement, username) {
         const canvas = document.getElementById('poster-canvas');
@@ -141,11 +157,10 @@ const AchievementSystem = {
         ctx.lineWidth = 8;
         ctx.strokeRect(20, 20, 560, 760);
         
-        // 标题
+        // 标题（#19: 自适应缩字号，避免超出 560px 内框）
         ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 48px Arial';
         ctx.textAlign = 'center';
-        ctx.fillText('🏆 ' + (window.I18n ? I18n.t('achievement.unlocked') : '成就解锁'), 300, 100);
+        this.drawFittedText(ctx, '🏆 ' + (window.I18n ? I18n.t('achievement.unlocked') : '成就解锁'), 300, 100, 500, 48, { bold: true, min: 20 });
 
         // 成就图标
         ctx.font = '120px Arial';
@@ -153,8 +168,7 @@ const AchievementSystem = {
 
         // 成就名称
         ctx.fillStyle = this.getLevelColor(achievement.level);
-        ctx.font = 'bold 42px Arial';
-        ctx.fillText(this.getName(achievement), 300, 380);
+        this.drawFittedText(ctx, this.getName(achievement), 300, 380, 500, 42, { bold: true, min: 18 });
         
         // 等级标签
         ctx.fillStyle = 'rgba(255,255,255,0.2)';
@@ -165,8 +179,7 @@ const AchievementSystem = {
         
         // 描述
         ctx.fillStyle = '#aaaaaa';
-        ctx.font = '28px Arial';
-        ctx.fillText(this.getDesc(achievement), 300, 520);
+        this.drawFittedText(ctx, this.getDesc(achievement), 300, 520, 500, 28, { min: 14 });
 
         // 用户名
         ctx.fillStyle = '#58a6ff';
@@ -175,8 +188,7 @@ const AchievementSystem = {
 
         // 底部
         ctx.fillStyle = '#666666';
-        ctx.font = '20px Arial';
-        ctx.fillText(window.I18n ? I18n.t('app.title') : '股市模拟器 - 纯娱乐版', 300, 720);
+        this.drawFittedText(ctx, window.I18n ? I18n.t('app.title') : '股市模拟器 - 纯娱乐版', 300, 720, 500, 20, { min: 12 });
 
         // 日期（使用当前语言区域格式）
         const locale = window.I18n ? I18n.getCurrentLanguage() : 'zh-CN';

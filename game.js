@@ -10,6 +10,10 @@ class LimitManager {
         // meant to detect abnormal single-tick volatility (e.g. a fat-finger or stale
         // data spike), so use a threshold based on per-tick move instead of intraday
         // move vs prevClose.
+        // Bug-fix note: the ordinary per-tick band is only +/-2% (+3% for the easter-egg
+        // stock), so a 5% threshold could still never fire. updateMarket() now injects a
+        // rare +/-4%~7% "flash" move (p ~= 0.1% per tick) which this threshold catches,
+        // making the documented circuit breaker a real (and rare) event instead of dead code.
         this.circuitBreakerThreshold = 0.05; // 5% per-tick move (was 20% intraday)
         this.circuitBreakerCooldown = 3; // 熔断冷却周期数
         this.circuitBreakerStatus = new Map(); // 记录每只股票的熔断状态
@@ -133,6 +137,12 @@ function isKnownStockCode(code) {
 // L9 Fix: normalise a user-typed stock code. Trim surrounding whitespace and convert
 // full-width digits/letters (common when typing with a Chinese IME) to ASCII so that
 // lookups and searches still match. Returns '' for empty input.
+// #16 Fix: one save carries a full market snapshot (~80KB once encoded), so a handful of
+// saves can exhaust the ~5MB localStorage quota and then *every* write fails. Cap the
+// list and warn before the quota is reached instead of silently losing all saves.
+const MAX_SAVES_PER_USER = 50;
+const STORAGE_WARN_BYTES = 4 * 1024 * 1024;
+
 function normalizeStockCode(value) {
     if (value === null || value === undefined) return '';
     let s = String(value);
@@ -272,6 +282,69 @@ function sanitizeUserData(raw) {
     return raw;
 }
 
+// #14 Fix: validate the persisted live-market snapshot. Imported backups used to lose
+// `market`/`marketSeed` entirely, so an import re-randomised every price (e.g. Maotai
+// 1036.97 -> 1925.88) and reset the game clock. Only finite, non-negative scalars and
+// known stock codes survive; anything malformed is dropped, never trusted.
+function sanitizeMarketState(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+    const out = {};
+    const nonNegInt = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+    };
+    const gt = raw.gameTime;
+    if (gt && typeof gt === 'object') {
+        const hour = Number(gt.hour), minute = Number(gt.minute);
+        if (Number.isFinite(hour) && Number.isFinite(minute)) {
+            out.gameTime = {
+                hour: ((hour | 0) % 24 + 24) % 24,
+                minute: ((minute | 0) % 60 + 60) % 60,
+                manualSet: !!gt.manualSet,
+                dayIndex: nonNegInt(gt.dayIndex) || 0
+            };
+        }
+    }
+    ['lastTradingDayIndex', 'marketTickCount', 'tradingDayCount'].forEach(k => {
+        const v = nonNegInt(raw[k]);
+        if (v !== undefined) out[k] = v;
+    });
+    if (typeof raw.gameTimePaused === 'boolean') out.gameTimePaused = raw.gameTimePaused;
+
+    if (raw.historySeeds && typeof raw.historySeeds === 'object' && !Array.isArray(raw.historySeeds)) {
+        const seeds = {};
+        Object.entries(raw.historySeeds).slice(0, 2000).forEach(([code, v]) => {
+            if (isKnownStockCode(code) && Number.isFinite(Number(v))) seeds[code] = Number(v) >>> 0;
+        });
+        if (Object.keys(seeds).length) out.historySeeds = seeds;
+    }
+
+    if (raw.stocks && typeof raw.stocks === 'object' && !Array.isArray(raw.stocks)) {
+        const scalarKeys = ['price', 'prevClose', 'open', 'high', 'low', 'volume', 'dailyVolume', 'prevDailyVolume', 'avgVolume'];
+        const barKeys = ['open', 'close', 'high', 'low', 'volume'];
+        const stocks = {};
+        Object.entries(raw.stocks).slice(0, 2000).forEach(([code, s]) => {
+            if (!isKnownStockCode(code) || !s || typeof s !== 'object') return;
+            const entry = {};
+            scalarKeys.forEach(k => {
+                const n = Number(s[k]);
+                if (Number.isFinite(n) && n >= 0) entry[k] = n;
+            });
+            if (s.lastBar && typeof s.lastBar === 'object') {
+                const bar = {};
+                barKeys.forEach(k => {
+                    const n = Number(s.lastBar[k]);
+                    if (Number.isFinite(n) && n >= 0) bar[k] = n;
+                });
+                if (Object.keys(bar).length) entry.lastBar = bar;
+            }
+            if (Object.keys(entry).length) stocks[code] = entry;
+        });
+        out.stocks = stocks;
+    }
+    return out;
+}
+
 // P0-1 Fix: Validate a single save object to reject malicious content
 function sanitizeSaveData(raw) {
     if (!raw || typeof raw !== 'object') throw new Error('Invalid save');
@@ -285,9 +358,15 @@ function sanitizeSaveData(raw) {
     save.name = (typeof raw.name === 'string' && raw.name.length >= 1 && raw.name.length <= 20)
         ? raw.name : '';
     // Name: restrict to safe character set (Chinese, letters, digits, limited punctuation)
-    if (save.name && !/^[\u4e00-\u9fa5a-zA-Z0-9\s\-_\.，。！？、：""''（）【】]+$/.test(save.name)) {
+    if (save.name && !/^[\u4e00-\u9fa5a-zA-Z0-9 \-_\.，。！？、：\u201c\u201d\u2018\u2019（）【】]+$/.test(save.name)) {
         save.name = '';
     }
+    // #14 Fix: keep the deterministic market seed + live snapshot so export/import (and a
+    // merge) is a real migration instead of a fresh random market with a reset clock.
+    const marketSeed = Number(raw.marketSeed);
+    save.marketSeed = Number.isFinite(marketSeed) ? Math.floor(marketSeed) : undefined;
+    save.market = sanitizeMarketState(raw.market);
+
     // P1-4 Fix: deep-validate nested structures. The old sanitizer only checked the
     // top-level scalars and passed holdings/dayTrades/gameStats/autoTrade straight
     // through, so a crafted backup could inject a holding for an unknown stock code
@@ -324,6 +403,11 @@ function sanitizeSaveData(raw) {
         if (!Number.isFinite(time)) return;
         save.records.push({
             time,
+            // Game-day fields (see recordTrade). Optional so exports from older builds
+            // still import; calculateSaveStats() falls back to the real date when absent.
+            dayIndex: Number.isFinite(Number(r.dayIndex)) ? Math.max(0, Math.floor(Number(r.dayIndex))) : undefined,
+            gameMinutes: Number.isFinite(Number(r.gameMinutes)) ? Math.min(1439, Math.max(0, Math.floor(Number(r.gameMinutes)))) : undefined,
+            fundBefore: Number.isFinite(Number(r.fundBefore)) && Number(r.fundBefore) >= 0 ? Number(r.fundBefore) : undefined,
             code: typeof r.code === 'string' ? r.code : '',
             name: typeof r.name === 'string' ? r.name.slice(0, 40) : '',
             type: r.type,
@@ -403,6 +487,41 @@ function sanitizeSaveData(raw) {
     });
     const rawAutoStats = (rawAuto.stats && typeof rawAuto.stats === 'object') ? rawAuto.stats : {};
     const rawTotalPnl = rawAutoStats.totalPnl !== undefined ? rawAutoStats.totalPnl : rawAutoStats.totalProfit;
+    // #14 Fix: keep the auto-trade history and per-stock counters. Dropping them let a
+    // user reset the "max trades per stock" risk control by exporting and re-importing.
+    const autoRecords = (Array.isArray(rawAuto.records) ? rawAuto.records : []).slice(0, 50).map(r => {
+        if (!r || typeof r !== 'object') return null;
+        const num = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
+        return {
+            time: num(r.time) || Date.now(),
+            success: !!r.success,
+            amount: num(r.amount),
+            message: typeof r.message === 'string' ? r.message.slice(0, 200) : '',
+            pnl: num(r.pnl),
+            code: typeof r.code === 'string' ? r.code.slice(0, 16) : '',
+            name: typeof r.name === 'string' ? r.name.slice(0, 40) : '',
+            direction: (r.direction === 'buy' || r.direction === 'sell') ? r.direction : '',
+            conditionType: typeof r.conditionType === 'string' ? r.conditionType.slice(0, 20) : '',
+            conditionValue: num(r.conditionValue),
+            buyPrice: num(r.buyPrice),
+            sellPrice: num(r.sellPrice),
+            pnlPercent: (typeof r.pnlPercent === 'number' || typeof r.pnlPercent === 'string') ? r.pnlPercent : 0
+        };
+    }).filter(Boolean);
+    const readFloatMap = (value) => {
+        const out = {};
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+            Object.entries(value).slice(0, 1000).forEach(([key, v]) => {
+                if (typeof key === 'string' && key.length > 0 && key.length <= 40 && Number.isFinite(Number(v)) && Number(v) >= 0) {
+                    out[key] = Number(v);
+                }
+            });
+        }
+        return out;
+    };
+    const autoCounts = readFloatMap(rawAuto.stockTradeCounts);
+    Object.keys(autoCounts).forEach(k => { autoCounts[k] = Math.floor(autoCounts[k]); });
+    const autoTimes = readFloatMap(rawAuto.lastTradeTimes);
     save.autoTrade = {
         enabled: !!rawAuto.enabled,
         paused: !!rawAuto.paused,
@@ -413,9 +532,9 @@ function sanitizeSaveData(raw) {
             failedTrades: nonNegInt(rawAutoStats.failedTrades !== undefined ? rawAutoStats.failedTrades : rawAutoStats.lossTrades),
             totalPnl: Number.isFinite(Number(rawTotalPnl)) ? Number(rawTotalPnl) : 0
         },
-        records: [],
-        stockTradeCounts: {},
-        lastTradeTimes: {},
+        records: autoRecords,
+        stockTradeCounts: autoCounts,
+        lastTradeTimes: autoTimes,
         maxTotalTrades: Number.isFinite(Number(rawAuto.maxTotalTrades)) && Number(rawAuto.maxTotalTrades) > 0 ? Math.floor(Number(rawAuto.maxTotalTrades)) : 100
     };
     return save;
@@ -432,6 +551,18 @@ class StockSimulator {
         this.tutorialStep = 0;
         this.debugClickCount = 0;
         this.debugClickTimer = null;
+        // Bug fix: market/clock persistence is throttled to whole ticks and also runs
+        // on tab-hide / page-unload (see autoSaveMarket()).
+        this.autoSaveThrottleMs = 2000;
+        this.lastAutoSaveAt = 0;
+        // #13 Fix: multi-tab coordination. The last ciphertext we wrote, plus a clone of
+        // the active save as it was last persisted, let saveUsers() detect a write from
+        // another tab and three-way-merge it instead of clobbering it.
+        this.lastStoredCipher = null;
+        this.saveBaseline = null;
+        // #15 Fix: whether the player typed their own price into the trade form. While it
+        // is false the field follows the live market; once true it is never overwritten.
+        this.tradePriceTouched = { buy: false, sell: false };
         
         // 涨跌停管理器
         this.limitManager = new LimitManager();
@@ -497,6 +628,7 @@ class StockSimulator {
             interval: null,
             lastTradeTimes: {},  // 每只股票的上次交易时间，防止重复交易
             stockTradeCounts: {},  // 每只股票的交易次数
+            maxTradesNotified: {},  // 已提示“达到单股最大交易次数”的配置（code-direction）
             maxTotalTrades: 100,  // 全局交易次数上限（可在风险控制页配置）
             limitNotified: false,  // 触顶提示是否已弹出
             // P2-6 Fix: failed attempts must not consume the shared maxTotalTrades
@@ -603,7 +735,17 @@ class StockSimulator {
             }
         }
 
-        // 4. 更新自选按钮文本
+        // 4. 成就弹窗是动态填充的节点：切换语言时若弹窗正显示，刷新成就名称，
+        //    否则弹窗里的成就名称会停留在原语言。
+        const achPopup = document.getElementById('achievement-popup');
+        if (achPopup && achPopup.classList.contains('show') && this._popupAchievement) {
+            const achNameEl = document.getElementById('achievement-name');
+            if (achNameEl) {
+                achNameEl.textContent = AchievementSystem.getName(this._popupAchievement);
+            }
+        }
+
+        // 5. 更新自选按钮文本
         const watchlistBtn = document.getElementById('watchlist-toggle-btn');
         if (watchlistBtn) {
             watchlistBtn.textContent = I18n.t(this.watchlistMode ? 'market.allView' : 'market.watchlistView');
@@ -621,6 +763,9 @@ class StockSimulator {
         // P1-7 Fix: prototype-less dictionary so a '__proto__' key can never reach the
         // inherited accessor and swap the users object's prototype.
         const data = localStorage.getItem('stock_simulator_users');
+        // #13 Fix: remember what we read so saveUsers() can tell whether another tab has
+        // written since (and only decrypt/merge when it actually has).
+        this.lastStoredCipher = data;
         if (!data) {
             this.users = Object.create(null);
             return;
@@ -638,7 +783,12 @@ class StockSimulator {
         }
         if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
             try {
-                localStorage.setItem('stock_simulator_users_corrupted_backup_' + Date.now(), data);
+                // #23 Fix: keep exactly ONE backup. A timestamped key added a fresh copy
+                // on every refresh, so 3 refreshes produced 3 identical backups.
+                const backupKey = 'stock_simulator_users_corrupted_backup';
+                if (!localStorage.getItem(backupKey)) {
+                    localStorage.setItem(backupKey, data);
+                }
             } catch (backupError) {
                 console.error('备份损坏数据失败:', backupError);
             }
@@ -689,13 +839,248 @@ class StockSimulator {
             // (a Set) is written as an array instead of degrading to {}. The previous
             // JSON.stringify silently dropped it, so sector-based achievements could
             // never accumulate across page reloads.
-            localStorage.setItem('stock_simulator_users', Crypto.encrypt(serializeUsersData(this.users)));
+            // #13 Fix: if another tab wrote since our last write, fold its changes into
+            // our in-memory copy before encrypting. Decrypting is only done when the
+            // stored ciphertext actually changed, so the hot auto-save path stays cheap.
+            let storedRaw = null;
+            try { storedRaw = localStorage.getItem('stock_simulator_users'); } catch (_) { storedRaw = null; }
+            if (storedRaw && storedRaw !== this.lastStoredCipher) {
+                this.reconcileWithStorage(this.readStoredUsers(storedRaw));
+            }
+            const cipher = Crypto.encrypt(serializeUsersData(this.users));
+            localStorage.setItem('stock_simulator_users', cipher);
+            this.lastStoredCipher = cipher;
+            this.syncSaveBaseline();
             return true;
         } catch (error) {
             console.error('保存用户数据失败:', error);
             this.showNotification(I18n.t('save.saveFailedStorage'), 'error');
             return false;
         }
+    }
+
+    // #13 Fix: decrypt + parse the persisted users map. Returns null for absent or
+    // unreadable data (never throws) so a merge can always fall back to a plain write.
+    readStoredUsers(raw) {
+        let storedRaw = raw;
+        if (storedRaw === undefined) {
+            try { storedRaw = localStorage.getItem('stock_simulator_users'); } catch (_) { storedRaw = null; }
+        }
+        if (!storedRaw) return null;
+        try {
+            const decrypted = Crypto.decrypt(storedRaw);
+            if (!decrypted) return null;
+            const parsed = JSON.parse(decrypted);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+            return parsed;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // #13 Fix: merge what is on disk into the in-memory users map.
+    //   - users that exist only on disk (registered in another tab) are kept
+    //   - saves that exist only on disk (created in another tab) are kept
+    //   - the save this tab has open is three-way-merged against the baseline snapshot
+    // Deleting in another tab is treated as not-seen-yet (the local copy wins), which is
+    // the safe direction: it never silently destroys a just-created save.
+    reconcileWithStorage(stored) {
+        if (!stored) return false;
+        let changed = false;
+        Object.keys(stored).forEach(username => {
+            if (!Object.prototype.hasOwnProperty.call(this.users, username)) {
+                this.users[username] = stored[username];
+                changed = true;
+            }
+        });
+        const username = this.currentUser && this.currentUser.username;
+        if (!username) return changed;
+        const local = this.users[username];
+        const remote = stored[username];
+        if (!local || !remote || !Array.isArray(local.saves) || !Array.isArray(remote.saves)) return changed;
+
+        const remoteById = new Map();
+        remote.saves.forEach(s => { if (s && typeof s.id === 'string') remoteById.set(s.id, s); });
+        local.saves.forEach((save, index) => {
+            if (!save || typeof save.id !== 'string') return;
+            const remoteSave = remoteById.get(save.id);
+            if (!remoteSave) return;
+            remoteById.delete(save.id);
+            const base = (this.saveBaseline && this.saveBaseline.id === save.id) ? this.saveBaseline : null;
+            const merged = this.mergeSaveData(base, save, remoteSave);
+            if (merged !== save) {
+                local.saves[index] = merged;
+                if (this.currentSave && this.currentSave.id === save.id) {
+                    this.currentSave = merged;
+                }
+                changed = true;
+            }
+        });
+        remoteById.forEach(save => {
+            if (local.saves.length >= MAX_SAVES_PER_USER * 3) return;
+            local.saves.push(save);
+            changed = true;
+        });
+        // The runtime auto-trade state shares its arrays with currentSave by reference.
+        // Replacing the save object above broke that aliasing, so new records would have
+        // landed on an orphaned array and the merged history would never be written.
+        if (this.currentSave && this.currentSave.autoTrade && this.autoTrade) {
+            this.autoTrade.configs = this.currentSave.autoTrade.configs || [];
+            this.autoTrade.stats = this.currentSave.autoTrade.stats || this.autoTrade.stats;
+            this.autoTrade.records = this.currentSave.autoTrade.records || [];
+            this.autoTrade.stockTradeCounts = this.currentSave.autoTrade.stockTradeCounts || {};
+            this.autoTrade.lastTradeTimes = this.currentSave.autoTrade.lastTradeTimes || {};
+        }
+        return changed;
+    }
+
+    // #13 Fix: three-way merge of one save. Numeric deltas are summed on top of the
+    // common ancestor, so two tabs each buying a different stock end up with both
+    // holdings and a consistent cash balance. Fields the live tab owns (name, settings,
+    // market/clock) always follow the local copy.
+    mergeSaveData(base, local, remote) {
+        if (!base || !local || !remote) return local;
+        if (base.id !== local.id || base.id !== remote.id) return local;
+        const merged = this.cloneSaveData(base);
+        ['id', 'createdAt', 'name', 'settings', 'market', 'marketSeed', 'initialFund'].forEach(k => {
+            merged[k] = local[k];
+        });
+        const asNumber = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
+        merged.fund = round2(asNumber(base.fund) + (asNumber(local.fund) - asNumber(base.fund)) + (asNumber(remote.fund) - asNumber(base.fund)));
+
+        const baseHoldings = base.holdings || {}, localHoldings = local.holdings || {}, remoteHoldings = remote.holdings || {};
+        const codes = new Set([...Object.keys(baseHoldings), ...Object.keys(localHoldings), ...Object.keys(remoteHoldings)]);
+        const holdings = {};
+        codes.forEach(code => {
+            const b = baseHoldings[code], l = localHoldings[code], r = remoteHoldings[code];
+            const bq = b ? asNumber(b.quantity) : 0, lq = l ? asNumber(l.quantity) : 0, rq = r ? asNumber(r.quantity) : 0;
+            const quantity = Math.max(0, Math.round(bq + (lq - bq) + (rq - bq)));
+            if (quantity <= 0) return;
+            const bc = b ? asNumber(b.totalCost) : 0, lc = l ? asNumber(l.totalCost) : 0, rc = r ? asNumber(r.totalCost) : 0;
+            let totalCost = bc + (lc - bc) + (rc - bc);
+            if (!Number.isFinite(totalCost) || totalCost < 0) totalCost = 0;
+            totalCost = round2(totalCost);
+            const source = l || r || b;
+            holdings[code] = {
+                name: source && typeof source.name === 'string' ? source.name : code,
+                quantity,
+                totalCost,
+                avgPrice: round2(totalCost / quantity)
+            };
+        });
+        merged.holdings = holdings;
+
+        merged.records = this.mergeRecordLists(base.records, local.records, remote.records);
+        merged.watchlist = Array.from(new Set([...(base.watchlist || []), ...(local.watchlist || []), ...(remote.watchlist || [])]));
+        merged.achievements = Array.from(new Set([...(base.achievements || []), ...(local.achievements || []), ...(remote.achievements || [])]));
+
+        const baseDay = base.dayTrades || {}, localDay = local.dayTrades || {}, remoteDay = remote.dayTrades || {};
+        const dayCodes = new Set([...Object.keys(baseDay), ...Object.keys(localDay), ...Object.keys(remoteDay)]);
+        const dayTrades = {};
+        dayCodes.forEach(code => {
+            const b = baseDay[code] || {}, l = localDay[code] || {}, r = remoteDay[code] || {};
+            const buy = Math.max(0, Math.round(asNumber(b.buy) + (asNumber(l.buy) - asNumber(b.buy)) + (asNumber(r.buy) - asNumber(b.buy))));
+            const sell = Math.max(0, Math.round(asNumber(b.sell) + (asNumber(l.sell) - asNumber(b.sell)) + (asNumber(r.sell) - asNumber(b.sell))));
+            if (buy || sell) dayTrades[code] = { buy, sell };
+        });
+        merged.dayTrades = dayTrades;
+
+        const baseStats = base.gameStats || {}, localStats = local.gameStats || {}, remoteStats = remote.gameStats || {};
+        const delta = (key) => asNumber(baseStats[key]) + (asNumber(localStats[key]) - asNumber(baseStats[key])) + (asNumber(remoteStats[key]) - asNumber(baseStats[key]));
+        merged.gameStats = {
+            tradeCount: Math.max(0, Math.round(delta('tradeCount'))),
+            profitCount: Math.max(0, Math.round(delta('profitCount'))),
+            lossCount: Math.max(0, Math.round(delta('lossCount'))),
+            maxHoldings: Math.max(asNumber(baseStats.maxHoldings), asNumber(localStats.maxHoldings), asNumber(remoteStats.maxHoldings)),
+            sectorsTraded: new Set([...(baseStats.sectorsTraded || []), ...(localStats.sectorsTraded || []), ...(remoteStats.sectorsTraded || [])]),
+            dayTrades: Math.max(0, Math.round(delta('dayTrades'))),
+            totalFees: Math.max(0, round2(delta('totalFees'))),
+            realizedProfit: Math.max(0, round2(delta('realizedProfit'))),
+            realizedLoss: Math.max(0, round2(delta('realizedLoss')))
+        };
+
+        // Auto-trade: runtime flags follow the live tab, configs/counters are merged.
+        const baseAuto = base.autoTrade || {}, localAuto = local.autoTrade || {}, remoteAuto = remote.autoTrade || {};
+        const configs = [];
+        const seenConfigs = new Set();
+        [...(localAuto.configs || []), ...(remoteAuto.configs || [])].forEach(cfg => {
+            if (!cfg || typeof cfg !== 'object') return;
+            const key = String(cfg.code) + '|' + String(cfg.direction) + '|' + String(cfg.createdAt);
+            if (seenConfigs.has(key)) return;
+            seenConfigs.add(key);
+            configs.push(cfg);
+        });
+        const baseCounts = baseAuto.stockTradeCounts || {};
+        const mergedCounts = Object.assign({}, baseCounts);
+        [localAuto.stockTradeCounts, remoteAuto.stockTradeCounts].forEach(map => {
+            Object.entries(map || {}).forEach(([key, value]) => {
+                const b = asNumber(baseCounts[key]);
+                mergedCounts[key] = Math.max(0, Math.round(b + (asNumber(value) - b)));
+            });
+        });
+        const mergedTimes = Object.assign({}, baseAuto.lastTradeTimes || {});
+        [localAuto.lastTradeTimes, remoteAuto.lastTradeTimes].forEach(map => {
+            Object.entries(map || {}).forEach(([key, value]) => {
+                const t = asNumber(value);
+                if (t > asNumber(mergedTimes[key])) mergedTimes[key] = t;
+            });
+        });
+        const baseAutoStats = baseAuto.stats || {};
+        const localAutoStats = localAuto.stats || {};
+        const remoteAutoStats = remoteAuto.stats || {};
+        const mergeCounter = (key) => Math.max(0, Math.round(asNumber(baseAutoStats[key]) + (asNumber(localAutoStats[key]) - asNumber(baseAutoStats[key])) + (asNumber(remoteAutoStats[key]) - asNumber(baseAutoStats[key]))));
+        merged.autoTrade = {
+            enabled: !!localAuto.enabled,
+            paused: !!localAuto.paused,
+            configs,
+            stats: {
+                totalTrades: mergeCounter('totalTrades'),
+                successTrades: mergeCounter('successTrades'),
+                failedTrades: mergeCounter('failedTrades'),
+                totalPnl: round2(asNumber(baseAutoStats.totalPnl) + (asNumber(localAutoStats.totalPnl) - asNumber(baseAutoStats.totalPnl)) + (asNumber(remoteAutoStats.totalPnl) - asNumber(baseAutoStats.totalPnl)))
+            },
+            records: this.mergeRecordLists(baseAuto.records, localAuto.records, remoteAuto.records, 50),
+            stockTradeCounts: mergedCounts,
+            lastTradeTimes: mergedTimes,
+            maxTotalTrades: asNumber(localAuto.maxTotalTrades) || asNumber(remoteAuto.maxTotalTrades) || 100
+        };
+        return merged;
+    }
+
+    // Union record lists by identity, newest first, capped.
+    mergeRecordLists(baseList, localList, remoteList, cap = 100) {
+        const seen = new Set();
+        const keyOf = (r) => [r && r.time, r && r.code, r && r.type, r && r.quantity, r && r.price, r && r.pnl].join('|');
+        const merged = [];
+        [...(localList || []), ...(remoteList || [])].forEach(record => {
+            if (!record || typeof record !== 'object') return;
+            const key = keyOf(record);
+            if (seen.has(key)) return;
+            seen.add(key);
+            merged.push(record);
+        });
+        merged.sort((a, b) => (Number(b.time) || 0) - (Number(a.time) || 0));
+        return merged.slice(0, cap);
+    }
+
+    // #13 Fix: remember the persisted state of the active save so the next merge has a
+    // common ancestor to diff against.
+    syncSaveBaseline() {
+        this.saveBaseline = this.currentSave ? this.cloneSaveData(this.currentSave) : null;
+    }
+
+    // Bug fix: persist the live market + game clock on a cadence so idle play is not
+    // lost on refresh (previously everything was only written on trade/rename/...), and
+    // also when the tab is hidden or the page is about to unload.
+    autoSaveMarket(force = false) {
+        if (!this.currentUser || !this.currentSave) return;
+        // finishSkip() performs a single save at the end of a fast-forward, so skip the
+        // per-tick writes while thousands of ticks are being simulated.
+        if (this.skipMode) return;
+        const now = Date.now();
+        if (!force && now - this.lastAutoSaveAt < this.autoSaveThrottleMs) return;
+        this.lastAutoSaveAt = now;
+        this.saveUsers();
     }
 
     // 事件绑定
@@ -747,6 +1132,43 @@ class StockSimulator {
         // 数字输入框统一注入主题化步进按钮（需在绑定其他事件前完成包装）
         this.enhanceNumberInputs();
         document.addEventListener('click', (e) => this.handleNumberStepperClick(e));
+
+        // Bug fix: flush the active save when the tab is hidden or the page is closing,
+        // so a refresh / close never rewinds the game clock or prices.
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) this.autoSaveMarket(true);
+        });
+        window.addEventListener('beforeunload', () => {
+            if (this.currentUser && this.currentSave) this.saveUsers();
+        });
+
+        // #13 Fix: another tab wrote to the shared database. Fold its changes in instead
+        // of ignoring them, otherwise the last tab to save silently wins and the other
+        // tab's trades are lost on the next refresh.
+        window.addEventListener('storage', (e) => {
+            if (e.key !== 'stock_simulator_users' || !e.newValue) return;
+            if (e.newValue === this.lastStoredCipher) return;
+            if (!this.currentUser) {
+                this.loadUsers();
+                const saveSelect = document.getElementById('save-select-screen');
+                if (saveSelect && saveSelect.classList.contains('active')) this.renderSaveList();
+                return;
+            }
+            const stored = this.readStoredUsers(e.newValue);
+            if (!stored) return;
+            if (this.reconcileWithStorage(stored)) {
+                this.lastStoredCipher = e.newValue;
+                this.showNotification(I18n.t('notification.multiTabMerged'));
+                if (this.currentSave) {
+                    this.updateTradeAvailable();
+                    this.updatePortfolio();
+                    this.renderStockList(this.stockSearch.keyword);
+                } else {
+                    const saveSelect = document.getElementById('save-select-screen');
+                    if (saveSelect && saveSelect.classList.contains('active')) this.renderSaveList();
+                }
+            }
+        });
 
         // 登录/注册标签切换
         document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -887,9 +1309,9 @@ class StockSimulator {
         // 交易输入
         document.getElementById('buy-code').addEventListener('input', (e) => this.onTradeCodeInput(e.target.value, 'buy'));
         document.getElementById('sell-code').addEventListener('input', (e) => this.onTradeCodeInput(e.target.value, 'sell'));
-        document.getElementById('buy-price').addEventListener('input', () => this.updateTradeEstimate('buy'));
+        document.getElementById('buy-price').addEventListener('input', () => { this.markTradePriceTouched('buy'); this.updateTradeEstimate('buy'); });
         document.getElementById('buy-quantity').addEventListener('input', () => this.updateTradeEstimate('buy'));
-        document.getElementById('sell-price').addEventListener('input', () => this.updateTradeEstimate('sell'));
+        document.getElementById('sell-price').addEventListener('input', () => { this.markTradePriceTouched('sell'); this.updateTradeEstimate('sell'); });
         document.getElementById('sell-quantity').addEventListener('input', () => this.updateTradeEstimate('sell'));
 
         // 数量快捷按钮
@@ -1002,9 +1424,13 @@ class StockSimulator {
         // P2 Fix: 全局交易次数上限改为可配置
         document.getElementById('auto-max-total-trades').addEventListener('change', (e) => this.setAutoTradeMaxTotal(e.target.value));
 
-        // 存档操作
-        document.getElementById('export-save-btn').addEventListener('click', () => this.exportSave());
-        document.getElementById('import-save-btn').addEventListener('click', () => this.importSave());
+        // 存档操作（导入/导出入口集中在选择存档页）
+        document.getElementById('import-single-save-btn').addEventListener('click', () => this.importSave('single'));
+        document.getElementById('import-all-data-btn').addEventListener('click', () => this.importSave('all'));
+        document.getElementById('export-all-data-btn').addEventListener('click', () => this.exportAllData());
+        // 修改密码 / 注销账户在选择存档页同样可用
+        document.getElementById('change-password-btn-save').addEventListener('click', () => this.showChangePasswordModal());
+        document.getElementById('delete-account-btn-save').addEventListener('click', () => this.deleteAccount());
         document.getElementById('switch-save-btn').addEventListener('click', () => this.showSaveSelect());
         document.getElementById('logout-from-profile-btn').addEventListener('click', () => this.logout());
         document.getElementById('delete-account-btn').addEventListener('click', () => this.deleteAccount());
@@ -1221,17 +1647,48 @@ class StockSimulator {
     // 登录
     // P1-4 Fix: never log password, username, or password hashes to console.
     // Uses async PBKDF2 verification; legacy 8-char hashes are auto-upgraded on success.
+    // 大小写不敏感地查找已有用户名，返回 { key, user }；找不到返回 null。
+    // requireUnique=true 时，若历史数据中存在多个仅大小写不同的账号（本修复
+    // 之前注册的），则返回 null，避免大小写不敏感登录产生歧义。
+    findUserIgnoreCase(username, requireUnique = false) {
+        if (typeof username !== 'string' || !username) return null;
+        const lower = username.toLowerCase();
+        const matches = Object.keys(this.users || {}).filter(k => k.toLowerCase() === lower);
+        if (matches.length === 0) return null;
+        if (requireUnique && matches.length > 1) return null;
+        const key = matches.includes(username) ? username : matches[0];
+        return { key, user: this.users[key] };
+    }
+
     async login() {
         const username = document.getElementById('login-username').value.trim();
         const password = document.getElementById('login-password').value;
         const errorEl = document.getElementById('login-error');
+        // Bug fix: clear the stale error immediately (the PBKDF2 verify below is async and
+        // used to leave the previous message on screen for ~360ms).
+        errorEl.textContent = '';
+        errorEl.style.color = '';
 
         if (!username || !password) {
             errorEl.textContent = I18n.t('auth.loginError.empty');
             return;
         }
 
-        const user = this.users[username];
+        // Bug fix: 用户名大小写不敏感解析。精确匹配优先；未命中时若忽略大小写后
+        // 恰好对应唯一已有账号，则登录到该账号。currentUser.username 使用存储键，
+        // 保证后续 this.users[currentUser.username] 的键值查找依然一致。
+        const exactUser = this.users[username];
+        let user = null;
+        let userKey = username;
+        if (exactUser) {
+            user = exactUser;
+        } else {
+            const ci = this.findUserIgnoreCase(username, true);
+            if (ci) {
+                userKey = ci.key;
+                user = ci.user;
+            }
+        }
         if (!user) {
             // P2-9 Fix: do not reveal whether a username exists (account enumeration).
             // Use the same message as a wrong password.
@@ -1239,13 +1696,21 @@ class StockSimulator {
             return;
         }
 
+        // Bug fix: show a loading state while the async KDF runs, and keep the button
+        // disabled so a double click cannot queue two verifications.
+        const loginBtn = document.getElementById('login-btn');
+        if (loginBtn) loginBtn.disabled = true;
+        errorEl.textContent = I18n.t('auth.processing');
         let verifyResult;
         try {
             verifyResult = await Crypto.verifyPassword(password, user.passwordHash);
         } catch (e) {
             errorEl.textContent = I18n.t('auth.loginError.wrongPassword');
             return;
+        } finally {
+            if (loginBtn) loginBtn.disabled = false;
         }
+        errorEl.textContent = '';
         if (!verifyResult || !verifyResult.valid) {
             errorEl.textContent = I18n.t('auth.loginError.wrongPassword');
             return;
@@ -1254,12 +1719,12 @@ class StockSimulator {
         // P1-4 Fix: if the stored hash was legacy, transparently upgrade it.
         if (verifyResult.upgradedHash) {
             user.passwordHash = verifyResult.upgradedHash;
-            this.users[username] = user;
+            this.users[userKey] = user;
             try { this.saveUsers(); } catch (_) { /* best-effort */ }
         }
 
-        this.currentUser = { username, ...user };
-        localStorage.setItem('stock_simulator_last_user', username);
+        this.currentUser = { username: userKey, ...user };
+        localStorage.setItem('stock_simulator_last_user', userKey);
         
         // 恢复用户主题偏好（不触发保存，避免循环）
         const savedTheme = this.currentUser.theme || 'dark';
@@ -1292,6 +1757,10 @@ class StockSimulator {
         const password = document.getElementById('reg-password').value;
         const confirm = document.getElementById('reg-confirm').value;
         const errorEl = document.getElementById('reg-error');
+        // Bug fix: clear the stale error immediately; the PBKDF2 hash below takes ~360ms
+        // and used to leave the previous message visible with no loading feedback.
+        errorEl.textContent = '';
+        errorEl.style.color = '';
 
         if (!username || username.length < 2 || username.length > 20) {
             errorEl.textContent = I18n.t('auth.regError.usernameLength');
@@ -1316,17 +1785,25 @@ class StockSimulator {
             return;
         }
 
-        if (this.users[username]) {
+        // Bug fix: 用户名大小写不敏感去重。此前 "Admin"/"admin"/"ADMIN" 可以同时
+        // 注册，存在冒名风险；现在只要忽略大小写后与已有用户名相同即拒绝。
+        if (this.users[username] || this.findUserIgnoreCase(username)) {
             errorEl.textContent = I18n.t('auth.regError.userExists');
             return;
         }
 
+        // Bug fix: loading state + disabled button while the async KDF runs.
+        const regBtn = document.getElementById('register-btn');
+        if (regBtn) regBtn.disabled = true;
+        errorEl.textContent = I18n.t('auth.processing');
         let passwordHash;
         try {
             passwordHash = await Crypto.hashAsync(password);
         } catch (e) {
             errorEl.textContent = I18n.t('auth.regError.generic');
             return;
+        } finally {
+            if (regBtn) regBtn.disabled = false;
         }
 
         this.users[username] = {
@@ -1393,6 +1870,7 @@ class StockSimulator {
             records: [],
             stockTradeCounts: {},
             lastTradeTimes: {},
+            maxTradesNotified: {},
             maxTotalTrades: 100,
             limitNotified: false,
             interval: null
@@ -1409,8 +1887,10 @@ class StockSimulator {
         this.currentTab = 'position';
         this.selectedStock = null;
         
-        // 重置主题到默认状态（可选）
-        // document.body.className = '';
+        // #23 Fix: the login screen must not inherit the previous account's theme.
+        document.body.className = '';
+        const themeToggleEl = document.getElementById('theme-toggle');
+        if (themeToggleEl) themeToggleEl.textContent = '🌙';
         
         // 显示成功提示
         this.showNotification(I18n.t('auth.logoutSuccess'));
@@ -1433,8 +1913,14 @@ class StockSimulator {
         const confirmMessage = I18n.t('deleteAccount.confirmText');
         const userInput = prompt(confirmMessage);
 
+        // #23 Fix: cancelling the prompt (null) is not a wrong input and must not raise
+        // the "输入不正确" error; just abort silently.
+        if (userInput === null) {
+            return;
+        }
+
         // 验证用户输入
-        if (userInput !== 'DELETE') {
+        if (userInput.trim() !== 'DELETE') {
             alert(I18n.t('deleteAccount.inputMismatch'));
             return;
         }
@@ -1498,6 +1984,20 @@ class StockSimulator {
             return;
         }
 
+        // #16 Fix: surface capacity. A save carries the whole market snapshot (~80KB once
+        // encoded), so the quota is reached long before the theoretical limit; warning the
+        // player up front avoids the situation where every write suddenly fails.
+        const capacity = document.createElement('p');
+        capacity.className = 'save-capacity';
+        const usedSlots = Array.isArray(saves) ? saves.length : 0;
+        let storedBytes = 0;
+        try {
+            const raw = localStorage.getItem('stock_simulator_users');
+            storedBytes = raw ? raw.length : 0;
+        } catch (_) { storedBytes = 0; }
+        capacity.textContent = I18n.t(storedBytes >= STORAGE_WARN_BYTES ? 'save.capacityWarn' : 'save.capacity', { used: usedSlots, max: MAX_SAVES_PER_USER });
+        listEl.appendChild(capacity);
+
         saves.forEach((save, index) => {
             const item = document.createElement('div');
             item.className = 'save-item';
@@ -1506,6 +2006,7 @@ class StockSimulator {
             const dateStr = escapeHtml(new Date(save.createdAt).toLocaleDateString(I18n.getCurrentLanguage()));
             const fundText = escapeHtml(this.formatMoney(save.fund));
             const enterText = escapeHtml(I18n.t('common.enter'));
+            const exportText = escapeHtml(I18n.t('common.export'));
             const renameText = escapeHtml(I18n.t('common.rename'));
             const deleteText = escapeHtml(I18n.t('common.delete'));
             item.innerHTML = `
@@ -1515,6 +2016,7 @@ class StockSimulator {
                 </div>
                 <div class="save-actions">
                     <button class="btn-enter" data-index="${index}">${enterText}</button>
+                    <button class="btn-export" data-index="${index}">${exportText}</button>
                     <button class="btn-rename" data-index="${index}">${renameText}</button>
                     <button class="btn-delete" data-index="${index}">${deleteText}</button>
                 </div>
@@ -1526,6 +2028,13 @@ class StockSimulator {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this.loadSave(parseInt(e.target.dataset.index));
+            });
+        });
+
+        listEl.querySelectorAll('.btn-export').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.exportSingleSave(parseInt(e.target.dataset.index));
             });
         });
 
@@ -1548,6 +2057,15 @@ class StockSimulator {
 
     // 显示设置界面
     showSetup() {
+        // #16 Fix: refuse to open the setup screen once the list is full instead of
+        // creating a save that pushes localStorage over quota (after which *every* write
+        // fails, including the ones for existing saves).
+        if (this.currentUser && Array.isArray(this.currentUser.saves) &&
+            this.currentUser.saves.length >= MAX_SAVES_PER_USER) {
+            alert(I18n.t('save.limitReached', { max: MAX_SAVES_PER_USER }));
+            this.showSaveSelect();
+            return;
+        }
         this.showScreen('game-setup-screen');
     }
 
@@ -1641,11 +2159,15 @@ class StockSimulator {
             }
         };
 
+        // #16 Fix: belt-and-braces guard (the setup screen is normally blocked first).
+        if (Array.isArray(this.currentUser.saves) && this.currentUser.saves.length >= MAX_SAVES_PER_USER) {
+            alert(I18n.t('save.limitReached', { max: MAX_SAVES_PER_USER }));
+            return;
+        }
         this.currentUser.saves.push(save);
         this.saveUsers();
-        // 仅新开局时随机设置一个交易时段内的游戏时间
-        // （切换/加载已有存档时不再重置时间，避免时间被强行重置引发一系列问题）
-        this.randomizeGameTime();
+        // 新开局的随机起始时间由 loadSave() 在“无持久化行情”时统一处理，
+        // 避免与 loadSave() 内部的状态重置相互覆盖。
         this.loadSave(this.currentUser.saves.length - 1);
     }
 
@@ -1656,6 +2178,25 @@ class StockSimulator {
         
         // 取消进行中的时间跳过，避免跳过流程与新存档互相干扰
         this.cancelSkip();
+        // P1-7/P1-8: 切换存档前先停掉所有定时器，避免旧存档的行情/自动交易继续运行
+        this.stopAllTimers();
+
+        // Bug fix: reset every session-scoped clock/pause field BEFORE restoring the new
+        // save. Previously a save paused in slot A left gameTimePaused = true, so a freshly
+        // created save B opened already "paused" with a frozen market.
+        this.gameTime = {
+            hour: 9,
+            minute: 30,
+            manualSet: false,
+            minutesPerTick: 1,
+            dayIndex: 0
+        };
+        this.lastTradingDayIndex = 0;
+        this.marketTickCount = 0;
+        this.tradingDayCount = 0;
+        this.gameTimePaused = false;
+        this.historySeeds = {};
+        this.limitManager.circuitBreakerStatus.clear();
         
         // 确保必要字段存在（兼容旧存档）
         if (!this.currentSave.watchlist) {
@@ -1739,6 +2280,9 @@ class StockSimulator {
             this.autoTrade.stockTradeCounts = this.currentSave.autoTrade.stockTradeCounts || {};
             this.autoTrade.lastTradeTimes = this.currentSave.autoTrade.lastTradeTimes || {};
             this.autoTrade.maxTotalTrades = this.currentSave.autoTrade.maxTotalTrades || 100;
+            // 单股“已达最大交易次数”的提示标记同样随存档恢复，避免上一存档的
+            // 标记泄漏到本存档、抑制本存档配置的首次提示。
+            this.autoTrade.maxTradesNotified = this.currentSave.autoTrade.maxTradesNotified || {};
             
             // 加载自动交易状态
             this.autoTrade.enabled = this.currentSave.autoTrade.enabled || false;
@@ -1783,6 +2327,12 @@ class StockSimulator {
         }
         this.initMarketData(this.currentSave.marketSeed);
         this.restoreMarketState();
+        // Bug fix: a brand-new save has no persisted market/clock, so give it a random
+        // in-session start time here (previously startGame() randomised first, but that
+        // value was then discarded by the reset above).
+        if (!this.currentSave.market) {
+            this.randomizeGameTime();
+        }
         this.showScreen('main-screen');
         
         // 更新自动交易状态UI
@@ -1828,6 +2378,11 @@ class StockSimulator {
         if (this.currentUser.tutorialCompleted !== true) {
             setTimeout(() => this.startTutorial(), 500);
         }
+
+        // #15 Fix: a freshly loaded save starts with market-following price fields.
+        this.tradePriceTouched = { buy: false, sell: false };
+        // #13 Fix: this is the persisted state subsequent merges diff against.
+        this.syncSaveBaseline();
     }
 
     // 删除存档
@@ -1880,7 +2435,10 @@ class StockSimulator {
         }
 
         // 验证字符（允许中英文、数字及常用符号）
-        const validPattern = /^[\u4e00-\u9fa5a-zA-Z0-9\s\-_\.，。！？、：""''（）【】]+$/;
+        // Bug fix: \s allowed tabs and the literal ""'' were ASCII quotes, so the
+        // rename rejected Chinese curly quotes while accepting straight quotes/tabs.
+        // Allow curly quotes (U+201C/D, U+2018/9) and a plain space only.
+        const validPattern = /^[\u4e00-\u9fa5a-zA-Z0-9 \-_\.，。！？、：\u201c\u201d\u2018\u2019（）【】]+$/;
         if (!validPattern.test(newName)) {
             errorEl.textContent = I18n.t('rename.error.invalid');
             return;
@@ -1888,22 +2446,35 @@ class StockSimulator {
         
         // 更新存档名称
         if (this.renameSaveIndex !== null && this.renameSaveIndex >= 0) {
-            this.currentUser.saves[this.renameSaveIndex].name = newName;
-            
+            const saveRef = this.currentUser.saves[this.renameSaveIndex];
+            const previousName = saveRef ? saveRef.name : '';
+            const userRef = (this.currentUser.username && this.users[this.currentUser.username])
+                ? this.users[this.currentUser.username] : null;
+
+            saveRef.name = newName;
             // 同步到 users 对象
-            if (this.currentUser.username && this.users[this.currentUser.username]) {
-                this.users[this.currentUser.username].saves[this.renameSaveIndex].name = newName;
+            if (userRef && userRef.saves && userRef.saves[this.renameSaveIndex]) {
+                userRef.saves[this.renameSaveIndex].name = newName;
             }
-            
-            // 保存到本地存储
-            this.saveUsers();
-            
+
+            // #17 Fix: check the write result. Previously "保存数据失败" and "存档名称修改成功"
+            // were shown together and the UI kept the new name even though nothing persisted.
+            if (!this.saveUsers()) {
+                saveRef.name = previousName;
+                if (userRef && userRef.saves && userRef.saves[this.renameSaveIndex]) {
+                    userRef.saves[this.renameSaveIndex].name = previousName;
+                }
+                this.renderSaveList();
+                errorEl.textContent = I18n.t('save.saveFailedStorage');
+                return;
+            }
+
             // 刷新存档列表
             this.renderSaveList();
-            
+
             // 显示成功提示
             this.showNotification(I18n.t('save.renameSuccess'));
-            
+
             // 关闭模态窗口
             this.hideRenameSaveModal();
         }
@@ -1977,6 +2548,11 @@ class StockSimulator {
         if (!this.currentSave) return null;
         const stocks = {};
         this.stockData.forEach((d, code) => {
+            // Bug fix: persist the in-progress daily K-line bar too. Without it, a reload
+            // rebuilt the (seeded) history whose last close was yesterday's close, while
+            // the live price was restored separately - so the last candle disagreed with
+            // the displayed price (close = prevClose, high < price).
+            const bar = d.history && d.history[d.history.length - 1];
             stocks[code] = {
                 price: d.price,
                 prevClose: d.prevClose,
@@ -1986,7 +2562,14 @@ class StockSimulator {
                 volume: d.volume,
                 dailyVolume: d.dailyVolume,
                 prevDailyVolume: d.prevDailyVolume,
-                avgVolume: d.avgVolume
+                avgVolume: d.avgVolume,
+                lastBar: bar ? {
+                    open: bar.open,
+                    close: bar.close,
+                    high: bar.high,
+                    low: bar.low,
+                    volume: bar.volume
+                } : null
             };
         });
         // K-line reset: persist only the stocks that were actually re-rolled. An empty
@@ -2034,8 +2617,22 @@ class StockSimulator {
                 scalarKeys.forEach(k => {
                     if (Number.isFinite(s[k]) && s[k] >= 0) d[k] = s[k];
                 });
+                // Bug fix: restore the in-progress daily bar so the last candle matches
+                // the restored live price (see captureMarketState).
+                if (s.lastBar && typeof s.lastBar === 'object' && Array.isArray(d.history) && d.history.length > 0) {
+                    const bar = d.history[d.history.length - 1];
+                    ['open', 'close', 'high', 'low', 'volume'].forEach(k => {
+                        if (Number.isFinite(s.lastBar[k]) && s.lastBar[k] >= 0) bar[k] = s.lastBar[k];
+                    });
+                }
                 if (Number.isFinite(d.prevClose) && d.prevClose > 0) {
                     d.price = this.limitManager.roundToTick(this.limitManager.clampPrice(d.price, d.prevClose));
+                }
+                // Guard against a stale persisted bar whose high/low missed the price.
+                if (Array.isArray(d.history) && d.history.length > 0) {
+                    const bar = d.history[d.history.length - 1];
+                    if (Number.isFinite(bar.high) && bar.high < d.price) bar.high = d.price;
+                    if (Number.isFinite(bar.low) && bar.low > d.price) bar.low = d.price;
                 }
             });
         }
@@ -2244,8 +2841,10 @@ class StockSimulator {
     isTradingTime() {
         const totalMinutes = this.gameTime.hour * 60 + this.gameTime.minute;
         // 交易时间：上午盘 9:30 - 11:30，下午盘 13:00 - 15:00
-        const isMorningSession = totalMinutes >= 570 && totalMinutes <= 690;  // 9:30 - 11:30
-        const isAfternoonSession = totalMinutes >= 780 && totalMinutes <= 900; // 13:00 - 15:00
+        // Bug fix: 真实 A 股在 11:30 / 15:00 收盘整点即停止交易（连续竞价结束），
+        // 此前闭区间让整点仍可下单。改为左闭右开：最后可交易时刻为 11:29 / 14:59。
+        const isMorningSession = totalMinutes >= 570 && totalMinutes < 690;  // [9:30, 11:30)
+        const isAfternoonSession = totalMinutes >= 780 && totalMinutes < 900; // [13:00, 15:00)
         return isMorningSession || isAfternoonSession;
     }
 
@@ -2281,6 +2880,9 @@ class StockSimulator {
     toggleTimePause() {
         this.gameTimePaused = !this.gameTimePaused;
         this.updateTimeDisplay();
+        // Bug fix: persist the pause flag so it is not silently lost (and later restored)
+        // on an unrelated refresh.
+        this.autoSaveMarket(true);
         this.showNotification(I18n.t(this.gameTimePaused ? 'notification.timePaused' : 'notification.timeResumed'));
     }
 
@@ -2289,10 +2891,11 @@ class StockSimulator {
         const cur = this.gameTime.hour * 60 + this.gameTime.minute;
 
         // 处于交易时段（含夜猫）：跳至本轮交易结束前1分钟（游戏时间以分钟计，≈结束前10秒）
-        if (cur >= 570 && cur <= 690) {      // 上午盘 9:30 - 11:30
+        // 边界与 isTradingTime 一致（左闭右开）：停在 11:29 / 14:59 这一最后可交易分钟。
+        if (cur >= 570 && cur < 690) {       // 上午盘 [9:30, 11:30)
             return cur < 689 ? 689 : null;   // → 11:29
         }
-        if (cur >= 780 && cur <= 900) {      // 下午盘 13:00 - 15:00
+        if (cur >= 780 && cur < 900) {       // 下午盘 [13:00, 15:00)
             return cur < 899 ? 899 : null;   // → 14:59
         }
 
@@ -2391,8 +2994,11 @@ class StockSimulator {
         if (this.selectedStock) {
             this.updateStockDetail();
         }
+        this.syncTradePriceFields();
         this.updatePortfolioRealTime();
         this.updateTradeAvailable();
+        // 跳过结束：一次性持久化推进后的行情与时钟
+        this.saveUsers();
         this.showNotification(I18n.t('notification.skipCompleted'));
     }
 
@@ -2437,9 +3043,12 @@ class StockSimulator {
                 if (this.selectedStock) {
                     this.updateStockDetail();
                 }
+                this.syncTradePriceFields();
                 this.updatePortfolioRealTime();
                 this.updateTradeAvailable();
             }
+            // 非交易时段只有游戏时钟在推进，同样需要持久化
+            this.autoSaveMarket();
             return;
         }
         
@@ -2511,6 +3120,15 @@ class StockSimulator {
                 // 普通股票：(-2% ~ +2%)
                 change = (Math.random() - 0.5) * 0.04;
             }
+            // Bug fix: the normal per-tick band is bounded at +/-2% (+3% for the
+            // easter-egg stock), so the 5% circuit-breaker threshold could never fire and
+            // was dead code. Real feeds occasionally deliver a stale / fat-finger quote
+            // spike; inject one rarely so the breaker detects a genuine abnormal move
+            // (~0.1% of ticks) instead of never. Direction is symmetric.
+            if (Math.random() < 0.0015) {
+                const spikeDir = Math.random() < 0.5 ? -1 : 1;
+                change = spikeDir * (0.04 + Math.random() * 0.03); // +/-4% ~ 7%
+            }
             const newPrice = Math.max(0.01, data.price * (1 + change));
             // P2-1 Fix: capture the pre-clamp price for per-tick circuit-breaker check
             const preClampPrice = data.price;
@@ -2572,9 +3190,12 @@ class StockSimulator {
             if (this.selectedStock) {
                 this.updateStockDetail();
             }
+            this.syncTradePriceFields();
             this.updatePortfolioRealTime();
             this.updateTradeAvailable();
         }
+        // Bug fix: persist the tick so a refresh resumes here instead of rolling back.
+        this.autoSaveMarket();
     }
 
     // 生成五档行情
@@ -2651,16 +3272,20 @@ class StockSimulator {
         let html = '';
         stocks.forEach(stock => {
             const data = this.stockData.get(stock.code);
-            const change = ((data.price - data.prevClose) / data.prevClose * 100).toFixed(2);
-            const changeClass = change >= 0 ? 'up' : 'down';
-            const changeSymbol = change >= 0 ? '+' : '';
+            // Bug fix: derive the sign from the numeric change, not from the toFixed()
+            // string. A price a hair below prevClose produced "-0.00", which string-compared
+            // as >= 0 and rendered the impossible "+-0.00%".
+            const changeNumRaw = (data.price - data.prevClose) / data.prevClose * 100;
+            const changeNum = Math.abs(changeNumRaw) < 0.005 ? 0 : changeNumRaw;
+            const changeClass = changeNum >= 0 ? 'up' : 'down';
+            const changeSymbol = changeNum > 0 ? '+' : '';
             const activeClass = this.selectedStock && this.selectedStock.code === stock.code ? 'active' : '';
             const isWatched = watchlist.includes(stock.code);
             // P0-1 Fix: escape all user-controllable fields
             const stockName = escapeHtml(stock.name);
             const stockCode = escapeHtml(stock.code);
             const priceText = escapeHtml(data.price.toFixed(2));
-            const changeText = escapeHtml(change);
+            const changeText = escapeHtml(changeNum.toFixed(2));
             
             html += `
                 <div class="stock-item ${activeClass}" data-code="${stockCode}">
@@ -2674,6 +3299,16 @@ class StockSimulator {
                 </div>
             `;
         });
+
+        // Bug fix: an empty result set used to render as a blank panel. Show a hint for
+        // "no search results" and for an empty watchlist.
+        if (stocks.length === 0) {
+            const emptyKey = (this.watchlistMode && !filter) ? 'market.watchlistEmpty' : 'market.noResults';
+            listEl.innerHTML = '<p style="text-align:center;color:var(--text-secondary);padding:40px;">'
+                + escapeHtml(I18n.t(emptyKey)) + '</p>';
+            this.updateSortIndicators();
+            return;
+        }
 
         listEl.innerHTML = html;
 
@@ -2851,6 +3486,12 @@ class StockSimulator {
     // 隐藏密码修改模态窗口
     hideChangePasswordModal() {
         document.getElementById('change-password-modal').classList.remove('active');
+        // #23 Fix: never leave plaintext passwords behind in the form after closing.
+        const fields = ['current-password', 'new-password', 'confirm-password'];
+        fields.forEach(id => {
+            const input = document.getElementById(id);
+            if (input) input.value = '';
+        });
     }
 
     // 修改密码
@@ -2934,9 +3575,13 @@ class StockSimulator {
         
         const data = this.stockData.get(this.selectedStock.code);
         if (!data) return;
-        const change = ((data.price - data.prevClose) / data.prevClose * 100).toFixed(2);
-        const changeClass = change >= 0 ? 'up' : 'down';
-        const changeSymbol = change >= 0 ? '+' : '';
+        // Bug fix: sign from the numeric change (see renderStockList) so "-0.00" never
+        // renders as "+-0.00%".
+        const changeNumRaw = (data.price - data.prevClose) / data.prevClose * 100;
+        const changeNum = Math.abs(changeNumRaw) < 0.005 ? 0 : changeNumRaw;
+        const change = changeNum.toFixed(2);
+        const changeClass = changeNum >= 0 ? 'up' : 'down';
+        const changeSymbol = changeNum > 0 ? '+' : '';
 
         document.getElementById('detail-name').textContent = data.name;
         document.getElementById('detail-code').textContent = data.code;
@@ -2974,21 +3619,10 @@ class StockSimulator {
             document.getElementById(`bid${i+1}-vol`).textContent = bid.volume;
         }
         
-        // 更新交易界面价格字段
-        const buyCode = document.getElementById('buy-code').value;
-        const sellCode = document.getElementById('sell-code').value;
-        
-        if (buyCode === this.selectedStock.code) {
-            const buyPriceEl = document.getElementById('buy-price');
-            buyPriceEl.value = data.price.toFixed(2);
-            this.updateTradeEstimate('buy');
-        }
-        
-        if (sellCode === this.selectedStock.code) {
-            const sellPriceEl = document.getElementById('sell-price');
-            sellPriceEl.value = data.price.toFixed(2);
-            this.updateTradeEstimate('sell');
-        }
+        // #15 Fix: follow the market only for fields the player has not edited. This
+        // replaces the old block that overwrote buy-price/sell-price on every tick
+        // whenever the typed code happened to equal the selected stock.
+        this.syncTradePriceFields();
         
         // 更新自选按钮状态
         this.updateWatchButton();
@@ -3540,10 +4174,43 @@ class StockSimulator {
             nameEl.textContent = stock.name;
             const data = this.stockData.get(stock.code);
             priceEl.value = data.price.toFixed(2);
+            // #15 Fix: entering a code re-arms the auto-fill for this side.
+            if (this.tradePriceTouched) this.tradePriceTouched[type] = false;
             this.updateTradeEstimate(type);
         } else {
             nameEl.textContent = '';
         }
+    }
+
+    // #15 Fix: the player typed a price of their own, so stop following the market.
+    markTradePriceTouched(type) {
+        if (!this.tradePriceTouched) this.tradePriceTouched = { buy: false, sell: false };
+        this.tradePriceTouched[type] = true;
+    }
+
+    // #15 Fix: keep the trade price field in step with the live market *only while the
+    // player has not typed a price*. Previously updateStockDetail() overwrote the field
+    // on every tick (a typed limit order such as 12.43 silently became 14.24), while a
+    // code that was not the selected stock kept a stale auto-filled price and the order
+    // then failed to fill. A per-side "touched" flag fixes both directions.
+    syncTradePriceFields() {
+        if (!this.currentSave) return;
+        if (!this.tradePriceTouched) this.tradePriceTouched = { buy: false, sell: false };
+        ['buy', 'sell'].forEach(type => {
+            if (this.tradePriceTouched[type]) return;
+            const codeEl = document.getElementById(type + '-code');
+            const priceEl = document.getElementById(type + '-price');
+            if (!codeEl || !priceEl) return;
+            const code = normalizeStockCode(codeEl.value || '');
+            if (!code) return;
+            const data = this.stockData.get(code);
+            if (!data || !Number.isFinite(data.price)) return;
+            const next = data.price.toFixed(2);
+            if (priceEl.value !== next) {
+                priceEl.value = next;
+                this.updateTradeEstimate(type);
+            }
+        });
     }
 
     // 更新交易预估
@@ -3574,15 +4241,25 @@ class StockSimulator {
         if (!code || !price) return;
 
         let maxQuantity = 0;
+        const tradeUnit = (this.currentSave.settings && this.currentSave.settings.tradeUnit) || 1;
         if (type === 'buy') {
-            maxQuantity = Math.floor(this.currentSave.fund / price / this.currentSave.settings.tradeUnit) * this.currentSave.settings.tradeUnit;
+            // Bug fix: reserve the buy fee. floor(fund / price) ignored the commission,
+            // so "all in" produced an order whose amount + fee exceeded the available
+            // cash and the buy was rejected with "insufficient funds".
+            const feeRate = (this.currentSave.settings && this.currentSave.settings.buyFee) || 0;
+            const perShareCost = price * (1 + feeRate);
+            maxQuantity = perShareCost > 0
+                ? Math.floor(this.currentSave.fund / perShareCost / tradeUnit) * tradeUnit
+                : 0;
         } else {
             const holding = this.currentSave.holdings[code];
             maxQuantity = holding ? holding.quantity : 0;
         }
 
         const quantity = Math.floor(maxQuantity * ratio / this.currentSave.settings.tradeUnit) * this.currentSave.settings.tradeUnit;
-        document.getElementById(`${type}-quantity`).value = quantity > 0 ? quantity : '';
+        // Assign a string: HTMLInputElement.value always coerces, but keeping it explicit
+        // means the value can never leak a number into the Number()/typeof validation.
+        document.getElementById(`${type}-quantity`).value = quantity > 0 ? String(quantity) : '';
         this.updateTradeEstimate(type);
     }
 
@@ -3716,8 +4393,14 @@ class StockSimulator {
         // L7 Fix: A-share quotes tick in 0.01, so round the entered price to cents.
         const price = this.limitManager.roundToTick(parsedPrice);
         const quantity = Number(quantityRaw);
-        if (typeof quantityRaw !== 'string' || quantityRaw.trim() === '' || !Number.isInteger(quantity) || quantity <= 0 || quantity > 1e9) {
+        if (typeof quantityRaw !== 'string' || quantityRaw.trim() === '' || !Number.isInteger(quantity) || quantity <= 0) {
             alert(I18n.t('trade.invalidQuantity'));
+            return;
+        }
+        // Bug fix: an oversized quantity (e.g. 1e10) used to be reported with the generic
+        // "enter a valid integer" message; give the real reason, like the price ceiling does.
+        if (quantity > 1e9) {
+            alert(I18n.t('trade.quantityTooHigh', { max: '1000000000' }));
             return;
         }
         // P2-3 Fix: quantity must be a multiple of the configured trade unit
@@ -3755,8 +4438,9 @@ class StockSimulator {
             return;
         }
 
-        // 记录交易
-        this.recordTrade(type, code, stock, fillPrice, quantity, amount, fee, tradeResult.pnl);
+        // 记录交易（传入下单前资金，供「梭哈选手」成就按真实仓位比例判定）
+        this.recordTrade(type, code, stock, fillPrice, quantity, amount, fee, tradeResult.pnl,
+            saveSnapshot ? saveSnapshot.fund : null);
 
         // P1-10 Fix: do not report success unless the trade actually persisted. On a
         // failed write, roll the trade back so the UI matches what is on disk.
@@ -3797,6 +4481,15 @@ class StockSimulator {
         const stock = this._stockPoolByCode ? this._stockPoolByCode.get(code) : StockPool.find(s => s.code === code);
         if (!stock) {
             return { valid: false, message: I18n.t('trade.stockNotExist') };
+        }
+
+        // Bug fix: check the sellable position before reasoning about prices, so selling a
+        // stock the player does not own reports "insufficient holdings" (not a price error).
+        if (type === 'sell') {
+            const holding = this.currentSave.holdings[code];
+            if (!holding || holding.quantity < quantity) {
+                return { valid: false, message: I18n.t('trade.insufficientHolding') };
+            }
         }
 
         // 验证价格与市场价格的合理性
@@ -3898,13 +4591,10 @@ class StockSimulator {
             return { success: false, message: I18n.t('trade.insufficientFund') };
         }
 
-        // T+1检查
-        if (!this.currentSave.settings.t0Mode) {
-            const dayTrades = this.currentSave.dayTrades[code] || { buy: 0, sell: 0 };
-            if (dayTrades.sell > 0) {
-                return { success: false, message: I18n.t('trade.t1BuyBlocked') };
-            }
-        }
+        // T+1 规则说明：真实 A 股只限制“当日买入的股票当日不得卖出”，并不限制
+        // “当日卖出后再买回同一只股票”。此前这里禁止当日卖出后买回，与真实规则
+        // 不符（买回后，当日新买入的部分依然受卖出侧 T+1 限制约束，无套利空间）。
+        // 卖出侧限制见 executeSellTrade。
 
         // 执行买入
         // P1-2 Fix: round money to cents to prevent float drift
@@ -3940,15 +4630,19 @@ class StockSimulator {
     // 执行卖出交易
     executeSellTrade(code, stock, price, quantity, amount, fee) {
         const holding = this.currentSave.holdings[code];
+        // Bug fix: check holdings FIRST. Selling a stock that is not held used to fall
+        // through to the non-finite guard below (because holding.avgPrice was undefined),
+        // which logged a console.error and reported "invalid trade amount" instead of the
+        // correct "insufficient holdings".
+        if (!holding || holding.quantity < quantity) {
+            return { success: false, message: I18n.t('trade.insufficientHolding') };
+        }
         // P0-2 Fix: reject non-finite proceeds/fund before mutating any state.
         if (!Number.isFinite(amount) || !Number.isFinite(fee) ||
             !Number.isFinite(this.currentSave.fund) ||
-            !Number.isFinite(holding && holding.avgPrice)) {
+            !Number.isFinite(holding.avgPrice)) {
             console.error('[executeSellTrade] 非有限金额，拒绝交易:', { amount, fee, fund: this.currentSave.fund });
             return { success: false, message: I18n.t('trade.invalidAmount') };
-        }
-        if (!holding || holding.quantity < quantity) {
-            return { success: false, message: I18n.t('trade.insufficientHolding') };
         }
 
         // T+1检查
@@ -3965,16 +4659,21 @@ class StockSimulator {
         // P1-2 Fix: round money to cents
         this.currentSave.fund = round2(this.currentSave.fund + totalIncome);
 
-        // P1-5 Fix: include sell fee in PnL so that achievements/stop-loss reflect realized profit
-        // pnl = (sell price - avg cost) * qty - sell fee (in cents precision)
-        const pnl = round2((price - holding.avgPrice) * quantity - fee);
+        // P1-5 Fix: include sell fee in PnL so that achievements/stop-loss reflect realized profit.
+        // Bug fix: the sold cost basis used to be recomputed from the cents-rounded
+        // avgPrice (round2(avgPrice * remainingQty)), so a partial sell made totalCost
+        // drift (e.g. 4213.27 -> 4212). Remove the exact proportional share of the stored
+        // total cost instead and re-derive the display average.
+        const removedCost = round2(holding.totalCost * quantity / holding.quantity);
+        const pnl = round2((price * quantity) - removedCost - fee);
 
         holding.quantity -= quantity;
-        // P1-2 Fix: round remaining cost basis to cents
-        holding.totalCost = round2(holding.avgPrice * holding.quantity);
+        holding.totalCost = round2(holding.totalCost - removedCost);
 
         if (holding.quantity === 0) {
             delete this.currentSave.holdings[code];
+        } else {
+            holding.avgPrice = round2(holding.totalCost / holding.quantity);
         }
 
         // 记录当日卖出
@@ -3985,20 +4684,33 @@ class StockSimulator {
 
         // 更新统计
         this.currentSave.gameStats.tradeCount++;
+        // Bug fix: 盈亏恰好为 0 的卖出既不算盈利也不算亏损（此前被计入亏损次数）
         if (pnl > 0) {
             this.currentSave.gameStats.profitCount++;
-        } else {
+        } else if (pnl < 0) {
             this.currentSave.gameStats.lossCount++;
         }
 
         return { success: true, pnl };
     }
 
+    // Bug fix: a single source of truth for "when did this happen in game time".
+    // The real calendar date is kept for display, but the game day (dayIndex) and the
+    // game-clock minutes are what every day/time-based achievement must use.
+    getGameTimestamp() {
+        const d = new Date();
+        d.setHours(this.gameTime.hour, this.gameTime.minute, 0, 0);
+        return {
+            time: d.getTime(),
+            dayIndex: this.gameTime.dayIndex || 0,
+            gameMinutes: this.gameTime.hour * 60 + this.gameTime.minute
+        };
+    }
+
     // 记录交易
-    recordTrade(type, code, stock, price, quantity, amount, fee, pnl) {
+    recordTrade(type, code, stock, price, quantity, amount, fee, pnl, fundBefore = null) {
         // 使用游戏时间创建交易记录时间
-        const gameDate = new Date();
-        gameDate.setHours(this.gameTime.hour, this.gameTime.minute, 0, 0);
+        const stamp = this.getGameTimestamp();
 
         // M6 Fix: accumulate fees + realized P&L in dedicated counters so the 100-record
         // cap cannot undercount the fee/profit achievements.
@@ -4011,15 +4723,22 @@ class StockSimulator {
             }
         }
 
+        // Bug fix: persist the game day + game-clock minutes (for day-based achievements
+        // and the "第 N 天 HH:MM" display) and the pre-trade cash (for 梭哈选手). Amounts
+        // are rounded to cents so records no longer carry values like 7730.83683.
+        const signedAmount = type === 'buy' ? -(amount + fee) : (amount - fee);
         this.currentSave.records.unshift({
-            time: gameDate.getTime(),
+            time: stamp.time,
+            dayIndex: stamp.dayIndex,
+            gameMinutes: stamp.gameMinutes,
+            fundBefore: Number.isFinite(fundBefore) ? round2(fundBefore) : null,
             code,
             name: stock.name,
             type,
             price,
             quantity,
-            amount: type === 'buy' ? -(amount + fee) : (amount - fee),
-            pnl
+            amount: round2(signedAmount),
+            pnl: round2(pnl)
         });
 
         // 限制记录数量
@@ -4047,6 +4766,8 @@ class StockSimulator {
             document.getElementById(`${tradeType}-quantity`).value = '';
             document.getElementById(`${tradeType}-estimate`).textContent = '--';
         });
+        // #15 Fix: the forms are empty again, so the price fields may follow the market.
+        this.tradePriceTouched = { buy: false, sell: false };
     }
 
     // 更新持仓页面
@@ -4224,8 +4945,19 @@ class StockSimulator {
             recordsTbody.innerHTML = this.currentSave.records.slice(0, 20).map(record => {
                 const date = new Date(record.time);
                 const typeClass = record.type === 'buy' ? 'down' : 'up';
+                // Bug fix: show the game day + game clock. Previously the real date was
+                // shown, so trades made on different game days collapsed onto one date.
+                let dateRaw;
+                if (Number.isFinite(record.dayIndex)) {
+                    const mins = Number.isFinite(record.gameMinutes) ? record.gameMinutes : 0;
+                    const hh = String(Math.floor(mins / 60) % 24).padStart(2, '0');
+                    const mm = String(mins % 60).padStart(2, '0');
+                    dateRaw = I18n.t('portfolio.recordDayTime', { day: record.dayIndex, time: hh + ':' + mm });
+                } else {
+                    dateRaw = date.toLocaleString(I18n.getCurrentLanguage());
+                }
                 // P0-1 Fix: escape all user-controllable fields
-                const dateText = escapeHtml(date.toLocaleString(I18n.getCurrentLanguage()));
+                const dateText = escapeHtml(dateRaw);
                 const recName = escapeHtml(record.name);
                 const recCode = escapeHtml(record.code);
                 const recPrice = escapeHtml(Number(record.price || 0).toFixed(2));
@@ -4434,19 +5166,45 @@ class StockSimulator {
         // 只统计卖出记录（买入记录的pnl为0，不影响连续盈利计算）
         const sellRecords = records.filter(record => record.type === 'sell');
 
+        // Bug fix: records used to be stamped with "real calendar date + game clock", so
+        // several game days shared one real date and every day-based achievement was
+        // distorted ("same-day" trades, 30-day holds, weekend trades). Records now carry
+        // the game day (dayIndex) and game-clock minutes; these helpers keep legacy
+        // records working.
+        const recDay = (r) => Number.isFinite(r.dayIndex)
+            ? r.dayIndex
+            : Math.floor((Number(r.time) || 0) / 86400000);
+        const recMinutes = (r) => {
+            if (Number.isFinite(r.gameMinutes)) return r.gameMinutes;
+            const d = new Date(Number(r.time) || 0);
+            return d.getHours() * 60 + d.getMinutes();
+        };
+        // Game calendar: game day 0 is the save's creation weekday, so the weekday-based
+        // weekend achievement is deterministic and actually reachable.
+        const saveBaseDay = (() => {
+            const d = new Date(Number(save.createdAt) || Date.now());
+            d.setHours(0, 0, 0, 0);
+            return d.getTime();
+        })();
+        const recWeekday = (r) => new Date(saveBaseDay + recDay(r) * 86400000).getDay();
+
         // P2-4 Fix: perfect_game and bagholder (longHolds) were declared in the stats
         // object but never computed, so those two achievements could never unlock.
-        const perfectGame = sellRecords.length > 0 && sellRecords.every(r => !(r.pnl < 0));
+        // Bug fix: "perfect_game" unlocked on the very first profitable sell because it
+        // only inspected the (100-entry, newest-first) record list. Require a meaningful
+        // sample and zero realised losses across the whole save.
+        const perfectGame = tradeCount >= 10 && totalProfit > 0 && totalLoss === 0
+            && sellRecords.some(r => r.pnl > 0);
         let computedLongHolds = 0;
         {
-            const firstBuyTime = new Map();
-            [...records].sort((a, b) => a.time - b.time).forEach(r => {
-                if (r.type === 'buy' && !firstBuyTime.has(r.code)) {
-                    firstBuyTime.set(r.code, r.time);
-                } else if (r.type === 'sell' && firstBuyTime.has(r.code)) {
-                    const days = (r.time - firstBuyTime.get(r.code)) / 86400000;
+            const firstBuyDay = new Map();
+            [...records].sort((a, b) => recDay(a) - recDay(b)).forEach(r => {
+                if (r.type === 'buy' && !firstBuyDay.has(r.code)) {
+                    firstBuyDay.set(r.code, recDay(r));
+                } else if (r.type === 'sell' && firstBuyDay.has(r.code)) {
+                    const days = recDay(r) - firstBuyDay.get(r.code);
                     if (days > computedLongHolds) computedLongHolds = days;
-                    firstBuyTime.delete(r.code);
+                    firstBuyDay.delete(r.code);
                 }
             });
         }
@@ -4479,10 +5237,17 @@ class StockSimulator {
         // M6 Fix: prefer the persisted cumulative fee counter. Fees used to be derived from
         // `records`, which is capped at 100 entries, so "纳税大户" was undercounted once the
         // player traded more than 100 times. Math.max keeps old saves working.
+        // Bug fix: `save.settings?.buyFee || 0.0003` treated a legitimate 0% fee as
+        // "unset" and fell back to the default rate, so a 0-fee save accumulated phantom
+        // fees and wrongly unlocked "纳税大户". Only fall back when the value is not a
+        // finite number.
+        const feeRateOf = (v, fallback) => (typeof v === 'number' && Number.isFinite(v)) ? v : fallback;
+        const saveBuyFee = feeRateOf(save.settings && save.settings.buyFee, 0.0003);
+        const saveSellFee = feeRateOf(save.settings && save.settings.sellFee, 0.0013);
         let recordsFees = 0;
         records.forEach(record => {
             const amount = record.price * record.quantity;
-            const fee = record.type === 'buy' ? amount * (save.settings?.buyFee || 0.0003) : amount * (save.settings?.sellFee || 0.0013);
+            const fee = record.type === 'buy' ? amount * saveBuyFee : amount * saveSellFee;
             recordsFees += fee;
         });
         const persistedFees = Number(save.gameStats && save.gameStats.totalFees);
@@ -4508,7 +5273,6 @@ class StockSimulator {
         let panicSells = 0;
         let luckyTrades = 0;
         let unluckyTrades = 0;
-        let roundNumberTrades = 0;
         let weekendTrades = 0;
         let earlyTrades = 0;
         let lateTrades = 0;
@@ -4518,69 +5282,84 @@ class StockSimulator {
         let palindromeProfit = false;
         let momentumTrades = 0;
         let currentMomentumStreak = 0;
+        // 强迫症：按股票代码记录是否存在“整数价买入/卖出”，循环结束后再统计
+        // 两者都存在的代码数（描述：同一只股票买、卖价格均为整数）。
+        const roundBuyByCode = new Map();
+        const roundSellByCode = new Map();
         
         // 计算日内交易统计
-        const dayTradeMap = new Map(); // 记录每天的股票交易次数
+        const dayTradeMap = new Map(); // 记录每个游戏日、每只股票的交易次数
         // P2-4 Fix: gameStats.dayTrades was never written anywhere, so day_trader /
-        // day_trader_pro were permanently stuck at 0. Derive it from the records:
-        // count calendar days that contain at least one buy and one sell.
-        const dayHasBuy = new Set();
-        const dayHasSell = new Set();
+        // day_trader_pro were permanently stuck at 0. Derive it from the records.
+        // Bug fix: 「日内交易」的描述是“同一天买入并卖出”，必须是同一只股票；
+        // 此前只按“天”统计，买 A 卖 B 也算数。现在按 (游戏日, 股票代码) 统计。
 
-        // P2-8 Fix: precompute whether a *later* record for the same code hits limit
-        // up/down, in one reverse pass. The previous implementation ran
-        // records.slice(index + 1).filter(...) for every buy record (O(n^2)). prevClose
-        // is constant per code during a single call, so two code sets are enough.
-        const futureLimitUpByCode = new Map();
-        const futureLimitDownByCode = new Map();
-        {
-            const seenUp = new Set();
-            const seenDown = new Set();
-            for (let i = records.length - 1; i >= 0; i--) {
-                const rr = records[i];
-                const sd = this.stockData.get(rr.code);
-                if (!sd) continue;
-                if (seenUp.has(rr.code)) futureLimitUpByCode.set(i, true);
-                if (seenDown.has(rr.code)) futureLimitDownByCode.set(i, true);
-                if (this.limitManager.isLimitUp(rr.price, sd.prevClose)) seenUp.add(rr.code);
-                if (this.limitManager.isLimitDown(rr.price, sd.prevClose)) seenDown.add(rr.code);
+        // K 线辅助：把游戏日映射到当日的 K 线。history 每个“交易日”恰好一根 K 线，
+        // 最后一根是当日实时 K 线；lastTradingDayIndex 在收盘后、次日首个交易 tick
+        // 之前的空档里仍指向上一个交易日（即最后一根 K 线所属日），因此以它为锚点
+        // 才能在任意时刻正确换算。
+        const lastBarDay = Number.isFinite(this.lastTradingDayIndex) && this.lastTradingDayIndex >= 0
+            ? this.lastTradingDayIndex
+            : (this.gameTime.dayIndex || 0);
+        const dayBar = (code, day) => {
+            const sd = this.stockData.get(code);
+            if (!sd || !Array.isArray(sd.history) || sd.history.length === 0) return null;
+            const offset = lastBarDay - day;
+            if (!Number.isFinite(offset) || offset < 0 || offset > sd.history.length - 1) return null;
+            const idx = sd.history.length - 1 - offset;
+            return { sd, bar: sd.history[idx], idx, isCurrent: offset === 0 };
+        };
+        // 还原“某个游戏日”的昨收价（该日涨跌停价的基准）。当日以实时 prevClose
+        // 为准（与交易校验使用的是同一个值）；历史日取其前一根 K 线的收盘价。
+        // 首根 K 线没有前一根，无法还原时返回 null，该记录跳过涨跌停类判定。
+        const dayPrevClose = (code, day) => {
+            const e = dayBar(code, day);
+            if (!e) return null;
+            if (e.isCurrent) {
+                return Number.isFinite(e.sd.prevClose) && e.sd.prevClose > 0 ? e.sd.prevClose : null;
             }
-        }
+            if (e.idx <= 0) return null;
+            const prev = e.sd.history[e.idx - 1].close;
+            return Number.isFinite(prev) && prev > 0 ? prev : null;
+        };
 
-        records.forEach((record, index) => {
+        records.forEach((record) => {
             const amount = record.price * record.quantity;
-            if (amount >= 100000) largeTrades++;
-            if (record.price === Math.floor(record.price)) roundNumberTrades++;
+            // Bug fix: 描述是“超过10万”，恰好 100000 不算（此前 >= 会解锁）。
+            if (amount > 100000) largeTrades++;
+            if (Number.isFinite(record.price) && record.price === Math.floor(record.price)) {
+                if (record.type === 'buy') roundBuyByCode.set(record.code, true);
+                else roundSellByCode.set(record.code, true);
+            }
             
-            // 梭哈选手：单笔交易使用90%以上资金
-            if (record.type === 'buy' && Math.abs(record.amount) >= save.fund * 0.9) {
+            // 梭哈选手：单笔买入使用「下单前」可用资金的 90% 以上
+            // Bug fix: save.fund is the post-trade balance, so a position using only
+            // ~47% of the account could satisfy the old check. Use the recorded pre-trade
+            // cash so the achievement matches its description.
+            if (record.type === 'buy' &&
+                Number.isFinite(record.fundBefore) && record.fundBefore > 0 &&
+                Math.abs(record.amount) >= record.fundBefore * 0.9) {
                 allInTrades++;
             }
             
-            // 使用涨跌停管理器计算涨停和跌停价格
-            const stockData = this.stockData.get(record.code);
-            if (stockData) {
-                const limitUpPrice = this.limitManager.calculateLimitUpPrice(stockData.prevClose);
-                const limitDownPrice = this.limitManager.calculateLimitDownPrice(stockData.prevClose);
-                
-                // FOMO患者：在涨停价买入
-                if (record.type === 'buy' && this.limitManager.isLimitUp(record.price, stockData.prevClose)) {
+            // 涨跌停类成就：全部改用“记录发生当日”的昨收价还原当日涨跌停价。
+            // Bug fix: 此前一律使用当前时刻的 stockData.prevClose，历史记录的判定
+            // 全部失真；幸运星/倒霉蛋更是拿玩家自己之后成交的另一条记录来冒充
+            // “股价涨停/跌停”，与描述完全不符。
+            const recPrevClose = dayPrevClose(record.code, recDay(record));
+            if (recPrevClose) {
+                // FOMO患者：在涨停价买入（按当日涨跌停价）
+                if (record.type === 'buy' && this.limitManager.isLimitUp(record.price, recPrevClose)) {
                     fomoTrades++;
                 }
-                
-                // 恐慌抛售：在跌停价卖出
-                if (record.type === 'sell' && this.limitManager.isLimitDown(record.price, stockData.prevClose)) {
+
+                // 恐慌抛售：在跌停价卖出（按当日涨跌停价）
+                if (record.type === 'sell' && this.limitManager.isLimitDown(record.price, recPrevClose)) {
                     panicSells++;
                 }
-                
-                // P2-8 Fix: O(1) lookups from the reverse pass above.
-                if (record.type === 'buy') {
-                    if (futureLimitUpByCode.get(index)) luckyTrades++;
-                    if (futureLimitDownByCode.get(index)) unluckyTrades++;
-                }
-                
-                // 趋势追逐者：连续追涨3只涨停股
-                if (record.type === 'buy' && this.limitManager.isLimitUp(record.price, stockData.prevClose)) {
+
+                // 趋势追逐者：连续追涨3只涨停股（按当日涨跌停价）
+                if (record.type === 'buy' && this.limitManager.isLimitUp(record.price, recPrevClose)) {
                     currentMomentumStreak++;
                     if (currentMomentumStreak >= 3) {
                         momentumTrades++;
@@ -4589,29 +5368,47 @@ class StockSimulator {
                     currentMomentumStreak = 0;
                 }
             }
+
+            // 幸运星/倒霉蛋：买入后股价（当日 K 线最高/最低价）真的触及当日
+            // 涨停/跌停价，而不是依赖玩家自己后续的成交记录。
+            if (record.type === 'buy') {
+                const e = dayBar(record.code, recDay(record));
+                if (e && recPrevClose) {
+                    const limitUpPrice = this.limitManager.calculateLimitUpPrice(recPrevClose);
+                    const limitDownPrice = this.limitManager.calculateLimitDownPrice(recPrevClose);
+                    if (Number.isFinite(e.bar.high) && e.bar.high >= limitUpPrice - 1e-9) {
+                        luckyTrades++;
+                    }
+                    if (Number.isFinite(e.bar.low) && e.bar.low <= limitDownPrice + 1e-9) {
+                        unluckyTrades++;
+                    }
+                }
+            }
             
-            // 周末战士：周五买入周一卖出
-            const tradeDate = new Date(record.time);
-            const dayOfWeek = tradeDate.getDay();
-            if (record.type === 'buy' && dayOfWeek === 5) {
-                // 检查是否有对应的周一卖出记录
-                const hasMondaySell = records.some(r => 
-                    r.type === 'sell' && 
+            // 周末战士：周五买入、周一卖出（按游戏日历判定）
+            // Bug fix: the old check used the real-calendar weekday of a timestamp that
+            // mixed the real date with the game clock, and required the real date to
+            // advance by ~3 days, so it was effectively impossible.
+            if (record.type === 'buy' && recWeekday(record) === 5) {
+                const buyDay = recDay(record);
+                const hasMondaySell = records.some(r =>
+                    r.type === 'sell' &&
                     r.code === record.code &&
-                    new Date(r.time).getDay() === 1 &&
-                    Math.abs(new Date(r.time).getTime() - record.time) < 3 * 24 * 60 * 60 * 1000
+                    recWeekday(r) === 1 &&
+                    recDay(r) - buyDay === 3
                 );
                 if (hasMondaySell) weekendTrades++;
             }
-            
-            // 早起的鸟儿：在开盘前5分钟完成交易
-            const hours = tradeDate.getHours();
-            const minutes = tradeDate.getMinutes();
-            const totalMinutes = hours * 60 + minutes;
+
+            // 早起的鸟儿：开盘后 5 分钟内完成交易（9:30-9:35）
+            // Bug fix: the Chinese description said "开盘前5分钟" while the check (and the
+            // English text) is "within 5 min of open"; the description is now corrected to
+            // match the logic instead of the other way around.
+            const totalMinutes = recMinutes(record);
             if (totalMinutes >= 570 && totalMinutes <= 575) { // 9:30-9:35
                 earlyTrades++;
             }
-            
+
             // 夜猫子：在收盘前5分钟完成交易
             // P2-4 Fix: the old window (11:35-11:40) is outside every trading session
             // (the morning close is 11:30), so executeTrade() always rejected it and the
@@ -4619,11 +5416,10 @@ class StockSimulator {
             if (totalMinutes >= 895 && totalMinutes <= 900) { // 14:55-15:00
                 lateTrades++;
             }
-            
-            // 摇摆不定：同一天内对同一只股票买卖3次以上
-            const dateKey = tradeDate.toDateString();
-            if (record.type === 'buy') dayHasBuy.add(dateKey);
-            else dayHasSell.add(dateKey);
+
+            // 摇摆不定：同一游戏日内对同一只股票买卖3次以上
+            // Bug fix: day grouping now uses the game day instead of the real date.
+            const dateKey = recDay(record);
             if (!dayTradeMap.has(dateKey)) {
                 dayTradeMap.set(dateKey, new Map());
             }
@@ -4634,9 +5430,10 @@ class StockSimulator {
             const stockTrades = stockMap.get(record.code);
             if (record.type === 'buy') stockTrades.buy++;
             else stockTrades.sell++;
-            
-            // 检查是否达到3次以上
-            if (stockTrades.buy + stockTrades.sell >= 3) {
+
+            // 摇摆不定：描述是“买卖3次以上”，只买不卖（或只卖不买）不算。
+            // Bug fix: 此前纯买入 3 次也会解锁。
+            if (stockTrades.buy >= 1 && stockTrades.sell >= 1 && stockTrades.buy + stockTrades.sell >= 3) {
                 yoYoTrades++;
             }
             
@@ -4651,30 +5448,42 @@ class StockSimulator {
         
         // P2-4 Fix: fold the computed day-trade count into the stat (fall back to the
         // persisted value for older saves that stored it directly).
-        const computedDayTrades = Array.from(dayHasBuy).filter(d => dayHasSell.has(d)).length;
+        // Bug fix: 「日内交易」= 同一游戏日内对同一只股票既有买入又有卖出。
+        const computedDayTrades = Array.from(dayTradeMap.values())
+            .filter(stockMap => Array.from(stockMap.values()).some(t => t.buy > 0 && t.sell > 0))
+            .length;
         dayTrades = Math.max(dayTrades, computedDayTrades);
 
         // 纸手：卖出后股价立即上涨20%
-        records.forEach((record, index) => {
-            if (record.type === 'sell' && record.pnl < 0) {
-                // 检查后续是否有该股票的价格记录
-                const data = this.stockData.get(record.code);
-                if (data && index > 0) {
-                    const nextRecord = records[index - 1];
-                    if (nextRecord && nextRecord.code === record.code) {
-                        // 简化判断：如果卖出价格低于当前价格20%
-                        if (data.price > record.price * 1.2) {
-                            paperHands++;
-                        }
-                    }
+        // Bug fix: 旧逻辑拿“当前价”对比卖出价，还要求紧邻的下一条成交记录是同一
+        // 只股票——判定的既不是“立即”，也不是真实行情。现在用 K 线还原：卖出当日
+        // 与其后两个交易日内，最高价只要有一次超过卖出价 20% 即算（±10% 涨跌停
+        // 下，卖出后连续两个涨停日即可达成 +21%）。
+        records.forEach(record => {
+            if (record.type !== 'sell') return;
+            const sellDay = recDay(record);
+            for (let d = 0; d <= 2; d++) {
+                const e = dayBar(record.code, sellDay + d);
+                if (e && Number.isFinite(e.bar.high) && e.bar.high >= record.price * 1.2 - 1e-9) {
+                    paperHands++;
+                    break;
                 }
             }
+        });
+
+        // 强迫症：统计“买入与卖出都出现过整数价”的股票数量
+        let roundNumberTrades = 0;
+        roundBuyByCode.forEach((_, code) => {
+            if (roundSellByCode.has(code)) roundNumberTrades++;
         });
 
         const stats = {
             tradeCount,
             totalProfit,
             totalLoss,
+            // 累计净盈利 = 累计盈利 - 累计亏损。千元户/万元户等“累计盈利”类成就
+            // 统一改用净额口径，与「单局收益率」一致（此前盈亏相抵净 0 也能解锁）。
+            netProfit: round2(totalProfit - totalLoss),
             maxHoldings,
             sectorsTraded: Array.from(sectorsTraded).length,
             dayTrades,
@@ -4788,6 +5597,8 @@ class StockSimulator {
     // 显示成就弹窗
     showAchievementPopup(achievement) {
         const popup = document.getElementById('achievement-popup');
+        // 记录当前展示的成就：切换语言时据此刷新弹窗里的成就名称（见 onLanguageChanged）
+        this._popupAchievement = achievement;
         document.getElementById('achievement-name').textContent = AchievementSystem.getName(achievement);
         popup.classList.add('show');
         
@@ -4838,7 +5649,9 @@ class StockSimulator {
             { text: I18n.t('tutorial.step3'), element: '.detail-quote', tab: 'market' },
             { text: I18n.t('tutorial.step4'), element: '.main-nav', tab: null },
             { text: I18n.t('tutorial.step5'), element: '.trade-form', tab: 'trade' },
-            { text: I18n.t('tutorial.step6'), element: '.position-list', tab: 'position' },
+            // #20 Fix: '.position-list' does not exist anywhere in the DOM, so the
+            // highlight box was 0x0. Point at the real holdings table instead.
+            { text: I18n.t('tutorial.step6'), element: '.portfolio-holdings', tab: 'position' },
             { text: I18n.t('tutorial.step7'), element: '.profile-header', tab: 'profile' },
             { text: I18n.t('tutorial.step8'), element: null, tab: 'profile' },
             { text: I18n.t('tutorial.step9'), element: null, tab: null }
@@ -4876,6 +5689,12 @@ class StockSimulator {
         }
 
         document.getElementById('tutorial-text').textContent = step.text;
+        // #20 Fix: the last step must read "完成"/"Finish", not "下一步"/"Next".
+        const tutorialNextBtn = document.getElementById('next-tutorial');
+        if (tutorialNextBtn) {
+            const isLastStep = this.tutorialStep === this.tutorialSteps.length - 1;
+            tutorialNextBtn.textContent = I18n.t(isLastStep ? 'tutorial.finish' : 'tutorial.next');
+        }
         const stepNumEl = document.getElementById('tutorial-step-num');
         const stepTotalEl = document.getElementById('tutorial-step-total');
         if (stepNumEl) {
@@ -4899,10 +5718,12 @@ class StockSimulator {
                 highlight.style.height = rect.height + 10 + 'px';
                 highlight.style.display = 'block';
 
-                // 定位提示框 - 智能选择位置
-                const tooltipWidth = 320;
-                const tooltipHeight = 150;
+                // Bug fix (#20): measure the real tooltip. The hardcoded 150px height was
+                // too small for step 5, so the "clamped" position still ran past the
+                // bottom of the viewport.
                 const padding = 20;
+                const tooltipWidth = Math.min(tooltip.offsetWidth || 320, Math.max(200, window.innerWidth - padding * 2));
+                const tooltipHeight = Math.min(tooltip.offsetHeight || 150, Math.max(150, window.innerHeight - padding * 2));
                 
                 // 尝试在元素下方显示
                 let tooltipTop = rect.bottom + padding;
@@ -4985,6 +5806,14 @@ class StockSimulator {
         if (overlay) {
             overlay.classList.remove('active');
         }
+        // #20 Fix: steps 7/8 switch to "我的"; finishing used to leave the player there.
+        // Return to the market page (only while a live session is on the main screen).
+        const mainScreen = document.getElementById('main-screen');
+        if (this.currentUser && this.currentSave && mainScreen && mainScreen.classList.contains('active')) {
+            this.switchTab('market');
+        }
+        const tutorialNextBtn = document.getElementById('next-tutorial');
+        if (tutorialNextBtn) tutorialNextBtn.textContent = I18n.t('tutorial.next');
         if (this.currentUser) {
             this.currentUser.tutorialCompleted = true;
             // 同步到 users 对象
@@ -5190,7 +6019,10 @@ class StockSimulator {
         const currentAchievements = this.currentSave.achievements || [];
 
         // 筛选出未解锁的成就
-        const lockedAchievements = allAchievements.filter(ach => !currentAchievements.includes(ach.id));
+        // Bug fix: never bulk-unlock the "coming soon" placeholders. The README documents
+        // them as intentionally unobtainable, and unlocking them made "成就猎人" a lie.
+        const lockedAchievements = allAchievements.filter(ach =>
+            !ach.comingSoon && !currentAchievements.includes(ach.id));
 
         if (lockedAchievements.length === 0) {
             alert(I18n.t('debug.allUnlocked'));
@@ -5753,13 +6585,63 @@ class StockSimulator {
         }
     }
 
-    // 导出/导入存档
-    exportSave() {
+    // #23 Fix: a small promise-based input modal. window.prompt() echoed passwords in
+    // clear text and could not be styled; this follows the app's existing modal pattern.
+    askInputModal(options = {}) {
+        return new Promise((resolve) => {
+            const modal = document.getElementById('input-prompt-modal');
+            if (!modal) { resolve(null); return; }
+            const titleEl = document.getElementById('input-prompt-title');
+            const msgEl = document.getElementById('input-prompt-message');
+            const field = document.getElementById('input-prompt-field');
+            const errorEl = document.getElementById('input-prompt-error');
+            const confirmBtn = document.getElementById('input-prompt-confirm');
+            const cancelBtn = document.getElementById('input-prompt-cancel');
+
+            if (titleEl) titleEl.textContent = options.title || I18n.t('prompt.title');
+            if (msgEl) msgEl.textContent = options.message || '';
+            field.type = options.password ? 'password' : 'text';
+            field.value = options.value || '';
+            field.setAttribute('placeholder', options.placeholder || '');
+            errorEl.textContent = '';
+            errorEl.style.display = 'none';
+            modal.classList.add('active');
+            setTimeout(() => field.focus(), 50);
+
+            const finish = (value) => {
+                modal.classList.remove('active');
+                confirmBtn.onclick = null;
+                cancelBtn.onclick = null;
+                field.onkeydown = null;
+                resolve(value);
+            };
+            confirmBtn.onclick = () => {
+                const value = field.value;
+                if (options.required && value.trim() === '') {
+                    errorEl.textContent = I18n.t('prompt.required');
+                    errorEl.style.display = 'block';
+                    return;
+                }
+                finish(value);
+            };
+            cancelBtn.onclick = () => finish(null);
+            field.onkeydown = (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); confirmBtn.click(); }
+                else if (e.key === 'Escape') { e.preventDefault(); cancelBtn.click(); }
+            };
+        });
+    }
+
+    // 导出/导入存档（入口都在选择存档页）
+    exportAllData() {
         // P2-5 Fix: never put the password hash inside a shareable backup file. It is
         // stripped here and a fresh password is set on import.
         const exportUser = Object.assign({}, this.currentUser);
         delete exportUser.passwordHash;
-        const data = Crypto.encrypt(JSON.stringify(exportUser));
+        // #14 Fix: serialize through serializeUsersData() like saveUsers() does. Plain
+        // JSON.stringify wrote gameStats.sectorsTraded (a Set) as {}, so sector-based
+        // achievement progress was lost from every exported backup.
+        const data = Crypto.encrypt(serializeUsersData(exportUser));
         const blob = new Blob([data], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -5769,7 +6651,7 @@ class StockSimulator {
         URL.revokeObjectURL(url);
     }
 
-    importSave() {
+    importSave(mode = 'all') {
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = '.txt';
@@ -5797,108 +6679,16 @@ class StockSimulator {
                     // P0-1 Fix: also sanitize each save (length-bounded, type-checked)
                     userData.saves = userData.saves.map(s => sanitizeSaveData(s));
 
-                    // Determine whether this username already exists BEFORE prompting, so a
-                    // merge can keep the existing password instead of silently replacing it.
-                    const existing = this.users[userData.username];
-
-                    // P2-4 Fix: when the username already exists, offer a non-destructive
-                    // merge path (replace / merge / cancel).
-                    let importMode = 'new';
-                    if (existing) {
-                        const choice = prompt(
-                            I18n.t('notification.importConflict', { username: userData.username }),
-                            'replace'
-                        );
-                        if (choice === null) return; // cancelled
-                        const normalized = String(choice).trim().toLowerCase();
-                        // M5 Fix: an unrecognised answer used to cancel silently — tell the user.
-                        if (normalized !== 'replace' && normalized !== 'merge') {
-                            alert(I18n.t('notification.importInvalidChoice'));
-                            return;
-                        }
-                        importMode = normalized;
-
-                        // P2-5 Fix: prove ownership of the existing account before an import
-                        // can replace or merge into it.
-                        const authPassword = prompt(I18n.t('notification.importAuthPrompt', { username: userData.username }));
-                        if (authPassword === null) return;
-                        let authResult = { valid: false };
-                        try {
-                            authResult = await Crypto.verifyPassword(authPassword, existing.passwordHash);
-                        } catch (_) {
-                            authResult = { valid: false };
-                        }
-                        if (!authResult || !authResult.valid) {
-                            alert(I18n.t('notification.importAuthFailed'));
-                            return;
-                        }
-                    }
-
-                    // P2-5 Fix: backups carry no hash. A fresh password is required for a new
-                    // account or a replace. M5 Fix: a merge folds the imported saves into the
-                    // LOCAL account and must keep its existing password — previously the asked
-                    // "new password" overwrote it, so the old password stopped working.
-                    if (!userData.passwordHash && importMode !== 'merge') {
-                        const newPassword = prompt(I18n.t('notification.importSetPassword'));
-                        if (newPassword === null) return;
-                        const confirmPassword = prompt(I18n.t('notification.importConfirmPassword'));
-                        if (confirmPassword === null) return;
-                        if (!newPassword || newPassword.length < 6 || newPassword.length > 20 ||
-                            newPassword !== confirmPassword) {
-                            alert(I18n.t('notification.importPasswordMismatch'));
-                            return;
-                        }
-                        userData.passwordHash = await Crypto.hashAsync(newPassword);
-                    }
-
-                    if (importMode === 'merge') {
-                        // Merge: combine saves (skip dup ids), keep local account + password
-                        const existingSaves = new Set(existing.saves.map(s => s.id));
-                        userData.saves = [...existing.saves, ...userData.saves.filter(s => !existingSaves.has(s.id))];
-                        userData.saves = userData.saves.slice(0, 50);
-                        // Preserve the local password and preferences when merging
-                        userData.passwordHash = existing.passwordHash;
-                        userData.theme = existing.theme || userData.theme;
-                        userData.refreshRate = existing.refreshRate || userData.refreshRate;
-                        userData.lang = existing.lang || userData.lang;
-                        userData.tutorialCompleted = existing.tutorialCompleted || userData.tutorialCompleted;
-                    }
-
-                    // P2-4 Fix: confirm before applying the (possibly destructive) import
-                    const displayName = String(userData.username).replace(/[<>&"']/g, '');
-                    if (!confirm(I18n.t('notification.importConfirm', { username: displayName }))) {
+                    // 单个存档导入：从文件里挑一个存档加入“当前账号”，不新建/覆盖账号
+                    if (mode === 'single') {
+                        await this.importSingleSaveFrom(userData);
                         return;
                     }
 
-                    this.users[userData.username] = userData;
-                    this.saveUsers();
-
-                    // P2-5 Fix: importing must never silently authenticate the importer.
-                    // Apply the imported display preferences, then force a fresh login
-                    // instead of adopting the imported identity via currentUser.
-                    const savedTheme = userData.theme || 'dark';
-                    document.body.className = savedTheme === 'light' ? 'light-theme' : savedTheme === 'festival' ? 'festival-theme' : '';
-                    const themeToggle = document.getElementById('theme-toggle');
-                    if (themeToggle) {
-                        themeToggle.textContent = savedTheme === 'light' ? '☀️' : savedTheme === 'festival' ? '🎉' : '🌙';
-                    }
-
-                    // 恢复导入存档的语言偏好
-                    if (userData.lang) {
-                        I18n.setLanguage(userData.lang, true);
-                    }
-
-                    this.teardownSession();
-                    this.currentUser = null;
-                    this.currentSave = null;
-                    this.showScreen('auth-screen');
-                    const loginUserEl = document.getElementById('login-username');
-                    const loginPassEl = document.getElementById('login-password');
-                    if (loginUserEl) loginUserEl.value = userData.username;
-                    if (loginPassEl) loginPassEl.value = '';
-                    const loginErrEl = document.getElementById('login-error');
-                    if (loginErrEl) loginErrEl.textContent = '';
-                    alert(I18n.t('notification.importSuccessRelogin'));
+                    // 导入所有数据：把备份中的全部存档合并进当前登录账号。
+                    // 不创建新账号、不覆盖当前账号的密码/偏好、不需要重新登录。
+                    // （存档级合并：与当前账号已有存档 id 相同的视为同一份，跳过）
+                    await this.importAllDataFrom(userData);
                 } catch (err) {
                     // P0-1 Fix: do not leak error details to console for user-controlled input
                     alert(I18n.t('notification.importFailed'));
@@ -5909,6 +6699,150 @@ class StockSimulator {
         input.click();
     }
 
+    // 导出单个存档：与整包导出同一文件格式（无密码的用户数据，只含一个存档）
+    exportSingleSave(index) {
+        const saves = (this.currentUser && this.currentUser.saves) || [];
+        const save = saves[index];
+        if (!save) return;
+        // P2-5 Fix: 同样不导出密码哈希
+        const exportUser = Object.assign({}, this.currentUser, { saves: [save] });
+        delete exportUser.passwordHash;
+        const data = Crypto.encrypt(serializeUsersData(exportUser));
+        const blob = new Blob([data], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const safeName = String(save.name || ('save_' + (index + 1))).replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 30);
+        a.download = `stock_simulator_save_${this.currentUser.username}_${safeName}_${Date.now()}.txt`;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    // 单个存档导入：把备份文件中的一个存档追加到当前账号
+    async importSingleSaveFrom(userData) {
+        if (!this.currentUser) return;
+        const fileSaves = (userData && Array.isArray(userData.saves)) ? userData.saves : [];
+        if (fileSaves.length === 0) {
+            alert(I18n.t('notification.importNoSaves'));
+            return;
+        }
+        const currentSaves = Array.isArray(this.currentUser.saves) ? this.currentUser.saves : (this.currentUser.saves = []);
+        if (currentSaves.length >= MAX_SAVES_PER_USER) {
+            alert(I18n.t('save.limitReached', { max: MAX_SAVES_PER_USER }));
+            return;
+        }
+        let picked = fileSaves[0];
+        if (fileSaves.length > 1) {
+            const pickedIndex = await this.pickSaveFromBackup(fileSaves);
+            if (pickedIndex === null || pickedIndex === undefined) return;
+            picked = fileSaves[pickedIndex];
+        }
+        const newSave = this.cloneSaveForImport(picked);
+        // 总是换一个全新的 id：导入自己导出的存档时 id 必然撞车
+        newSave.id = (Crypto && Crypto.uuid) ? Crypto.uuid()
+            : (Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
+        currentSaves.push(newSave);
+        if (!this.saveUsers()) {
+            currentSaves.splice(currentSaves.indexOf(newSave), 1);
+            alert(I18n.t('save.saveFailedStorage'));
+            return;
+        }
+        this.renderSaveList();
+        this.showNotification(I18n.t('notification.importSingleSuccess', { name: newSave.name || '' }));
+    }
+    // 导入所有数据：把备份中的全部存档追加到当前登录账号（不创建新账号、不修改偏好、不重登）
+    importAllDataFrom(userData) {
+        if (!this.currentUser) return;
+        const fileSaves = (userData && Array.isArray(userData.saves)) ? userData.saves : [];
+        if (fileSaves.length === 0) {
+            alert(I18n.t('notification.importNoSaves'));
+            return;
+        }
+        const currentSaves = Array.isArray(this.currentUser.saves) ? this.currentUser.saves : (this.currentUser.saves = []);
+        // 已存在的存档 id 直接跳过，避免把同一份存档导入两遍
+        const existingIds = new Set(currentSaves.map(s => s.id));
+        const fresh = [];
+        for (const s of fileSaves) {
+            if (!existingIds.has(s.id)) { existingIds.add(s.id); fresh.push(s); }
+        }
+        if (fresh.length === 0) {
+            alert(I18n.t('notification.importAllNoNew'));
+            return;
+        }
+        const room = MAX_SAVES_PER_USER - currentSaves.length;
+        if (room <= 0) {
+            alert(I18n.t('save.limitReached', { max: MAX_SAVES_PER_USER }));
+            return;
+        }
+        const toAdd = fresh.slice(0, room);
+        const dropped = fresh.length - toAdd.length;
+        if (!confirm(I18n.t('notification.importAllConfirm', { count: toAdd.length, username: this.currentUser.username }))) {
+            return;
+        }
+        const added = [];
+        for (const src of toAdd) {
+            const cloned = this.cloneSaveForImport(src);
+            // 保留原 id（与当前账号不冲突），让多标签合并能识别“同一份存档”
+            added.push(cloned);
+            currentSaves.push(cloned);
+        }
+        if (!this.saveUsers()) {
+            currentSaves.splice(currentSaves.length - added.length, added.length);
+            alert(I18n.t('save.saveFailedStorage'));
+            return;
+        }
+        this.renderSaveList();
+        let msg = I18n.t('notification.importAllDone', { added: added.length });
+        const skipped = fileSaves.length - fresh.length;
+        if (skipped > 0) msg += I18n.t('notification.importAllSkippedPart', { skipped });
+        if (dropped > 0) msg += I18n.t('notification.importAllDroppedPart', { dropped, max: MAX_SAVES_PER_USER });
+        this.showNotification(msg);
+    }
+
+    // 深拷贝一个从文件解析出来的存档：gameStats.sectorsTraded 是 Set，JSON 往返会变 {}，
+    // 所以优先 structuredClone，降级时手动修复该字段。
+    cloneSaveForImport(save) {
+        if (typeof structuredClone === 'function') return structuredClone(save);
+        const cloned = JSON.parse(JSON.stringify(save));
+        if (cloned.gameStats) {
+            cloned.gameStats.sectorsTraded = normalizeSectorsTraded(save.gameStats && save.gameStats.sectorsTraded);
+        }
+        return cloned;
+    }
+
+    // 备份里有多个存档时，弹出列表让用户挑一个；resolve 索引或 null（取消）
+    pickSaveFromBackup(fileSaves) {
+        return new Promise((resolve) => {
+            const modal = document.getElementById('import-pick-modal');
+            const list = document.getElementById('import-pick-list');
+            const cancelBtn = document.getElementById('import-pick-cancel');
+            list.innerHTML = '';
+            fileSaves.forEach((save, index) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'import-pick-item';
+                const name = escapeHtml(save.name || I18n.t('save.defaultName', { index: index + 1 }));
+                const dateStr = escapeHtml(new Date(save.createdAt).toLocaleDateString(I18n.getCurrentLanguage()));
+                const fundText = escapeHtml(this.formatMoney(save.fund));
+                btn.innerHTML = `<strong>${name}</strong><span>${I18n.t('save.info', { fund: fundText, date: dateStr })}</span>`;
+                btn.addEventListener('click', () => {
+                    this.hideImportPickModal();
+                    resolve(index);
+                });
+                list.appendChild(btn);
+            });
+            cancelBtn.onclick = () => {
+                this.hideImportPickModal();
+                resolve(null);
+            };
+            modal.classList.add('active');
+        });
+    }
+
+    hideImportPickModal() {
+        const modal = document.getElementById('import-pick-modal');
+        if (modal) modal.classList.remove('active');
+    }
     // 工具函数（支持国际化的金额格式化）
     formatMoney(amount) {
         if (window.I18n && I18n.getCurrentLanguage() === 'en-US') {
@@ -6021,12 +6955,16 @@ class StockSimulator {
             profitOption.textContent = I18n.t('auto.profitDisabledOption');
 
             // 显示提示信息
+            // Bug fix: 切换语言时提示节点已存在，旧代码因 "!profitTip" 判断直接
+            // 跳过，导致英文界面残留中文提示。已存在时也要刷新其文案。
             if (!profitTip) {
                 const tipDiv = document.createElement('div');
                 tipDiv.id = 'profit-tip';
                 tipDiv.className = 'form-tip';
                 tipDiv.textContent = I18n.t('auto.profitTip');
                 conditionTypeSelect.parentNode.appendChild(tipDiv);
+            } else {
+                profitTip.textContent = I18n.t('auto.profitTip');
             }
         } else {
             // 卖出方向：启用盈利目标选项
@@ -6050,18 +6988,24 @@ class StockSimulator {
         if (!stock) return;
         
         let maxQuantity = 0;
+        const tradeUnit = (this.currentSave.settings && this.currentSave.settings.tradeUnit) || 1;
         if (direction === 'buy') {
             const data = this.stockData.get(code);
             if (!data) return;
             const price = data.price;
-            maxQuantity = Math.floor(this.currentSave.fund / price / this.currentSave.settings.tradeUnit) * this.currentSave.settings.tradeUnit;
+            // Bug fix: reserve the buy fee so "all in" cannot exceed available cash.
+            const feeRate = (this.currentSave.settings && this.currentSave.settings.buyFee) || 0;
+            const perShareCost = price * (1 + feeRate);
+            maxQuantity = perShareCost > 0
+                ? Math.floor(this.currentSave.fund / perShareCost / tradeUnit) * tradeUnit
+                : 0;
         } else {
             const holding = this.currentSave.holdings[code];
             maxQuantity = holding ? holding.quantity : 0;
         }
         
         const quantity = Math.floor(maxQuantity * ratio / this.currentSave.settings.tradeUnit) * this.currentSave.settings.tradeUnit;
-        document.getElementById('auto-quantity').value = quantity > 0 ? quantity : '';
+        document.getElementById('auto-quantity').value = quantity > 0 ? String(quantity) : '';
     }
 
     // 添加自动交易股票
@@ -6071,14 +7015,25 @@ class StockSimulator {
         const direction = document.querySelector('input[name="auto-direction"]:checked').value;
         const conditionType = document.getElementById('auto-condition-type').value;
         const conditionOperator = document.getElementById('auto-condition-operator').value;
-        const conditionValue = parseFloat(document.getElementById('auto-condition-value').value);
-        const quantity = parseInt(document.getElementById('auto-quantity').value);
+        const conditionValueRaw = document.getElementById('auto-condition-value').value;
+        const quantityRaw = document.getElementById('auto-quantity').value;
         const priceType = document.getElementById('auto-price-type').value;
-        const limitPrice = parseFloat(document.getElementById('auto-limit-price').value);
-        const stopLoss = parseFloat(document.getElementById('auto-stop-loss').value);
-        const takeProfit = parseFloat(document.getElementById('auto-take-profit').value);
-        const maxTrades = parseInt(document.getElementById('auto-max-trades').value);
-        const maxAmount = parseFloat(document.getElementById('auto-max-amount').value);
+        const limitPriceRaw = document.getElementById('auto-limit-price').value;
+        const stopLossRaw = document.getElementById('auto-stop-loss').value;
+        const takeProfitRaw = document.getElementById('auto-take-profit').value;
+        const maxTradesRaw = document.getElementById('auto-max-trades').value;
+        const maxAmountRaw = document.getElementById('auto-max-amount').value;
+        // Bug fix: parse every numeric field with Number() instead of parseInt/parseFloat.
+        // parseInt silently turned "1.9", "1e3" and "1e20" into 1; blank fields became NaN
+        // and were stored as 0 through isNaN() checks. All values are validated below.
+        const conditionValue = Number(conditionValueRaw);
+        const quantity = Number(quantityRaw);
+        const limitPrice = Number(limitPriceRaw);
+        const stopLoss = Number(stopLossRaw);
+        const takeProfit = Number(takeProfitRaw);
+        const maxTrades = Number(maxTradesRaw);
+        const maxAmount = Number(maxAmountRaw);
+        const isBlankInput = (raw) => typeof raw !== 'string' || raw.trim() === '';
 
         if (!code) {
             alert(I18n.t('auto.requireStockCode'));
@@ -6104,8 +7059,15 @@ class StockSimulator {
             return;
         }
 
-        if (!quantity || quantity <= 0) {
+        // Bug fix: quantity used to be parseInt'd with only a "> 0" check, so "1.9",
+        // "1e3" and "1e20" all silently became 1 with no upper bound. Mirror manual
+        // trading: must be a finite positive integer within a sane ceiling.
+        if (isBlankInput(quantityRaw) || !Number.isInteger(quantity) || quantity <= 0) {
             alert(I18n.t('auto.invalidQuantity'));
+            return;
+        }
+        if (quantity > 1e9) {
+            alert(I18n.t('trade.quantityTooHigh', { max: '1000000000' }));
             return;
         }
 
@@ -6118,9 +7080,18 @@ class StockSimulator {
         }
 
         // 时间间隔模式不需要条件值
-        if (conditionType !== 'time' && isNaN(conditionValue)) {
-            alert(I18n.t('auto.requireConditionValue'));
-            return;
+        if (conditionType !== 'time') {
+            if (isBlankInput(conditionValueRaw) || !Number.isFinite(conditionValue)) {
+                alert(I18n.t('auto.requireConditionValue'));
+                return;
+            }
+            // Bug fix: a negative "profit target" (-500) used to invert the below
+            // comparison and fire on the first tick after a buy. The field is a money
+            // amount, so it must be positive.
+            if (conditionType === 'profit' && conditionValue <= 0) {
+                alert(I18n.t('auto.invalidProfitValue'));
+                return;
+            }
         }
 
         // 盈利目标模式只支持卖出操作
@@ -6129,8 +7100,27 @@ class StockSimulator {
             return;
         }
 
-        if (priceType === 'limit' && isNaN(limitPrice)) {
+        if (priceType === 'limit' &&
+            (isBlankInput(limitPriceRaw) || !Number.isFinite(limitPrice) || limitPrice <= 0)) {
             alert(I18n.t('auto.requireLimitPrice'));
+            return;
+        }
+
+        // 风控参数（可选）：留空表示不限制，一旦填写必须是合法数值
+        if (!isBlankInput(stopLossRaw) && !Number.isFinite(stopLoss)) {
+            alert(I18n.t('auto.invalidStopLoss'));
+            return;
+        }
+        if (!isBlankInput(takeProfitRaw) && (!Number.isFinite(takeProfit) || takeProfit <= 0)) {
+            alert(I18n.t('auto.invalidTakeProfit'));
+            return;
+        }
+        if (!isBlankInput(maxTradesRaw) && (!Number.isInteger(maxTrades) || maxTrades <= 0 || maxTrades > 1e6)) {
+            alert(I18n.t('auto.invalidMaxTrades'));
+            return;
+        }
+        if (!isBlankInput(maxAmountRaw) && (!Number.isFinite(maxAmount) || maxAmount <= 0)) {
+            alert(I18n.t('auto.invalidMaxAmount'));
             return;
         }
 
@@ -6147,14 +7137,22 @@ class StockSimulator {
             limitPrice: priceType === 'limit' && Number.isFinite(limitPrice)
                 ? this.limitManager.roundToTick(limitPrice)
                 : 0,
-            stopLoss: isNaN(stopLoss) ? 0 : stopLoss,
-            takeProfit: isNaN(takeProfit) ? 0 : takeProfit,
-            maxTrades: isNaN(maxTrades) ? 0 : maxTrades,
-            maxAmount: isNaN(maxAmount) ? 0 : maxAmount,
+            stopLoss: isBlankInput(stopLossRaw) ? 0 : stopLoss,
+            takeProfit: isBlankInput(takeProfitRaw) ? 0 : takeProfit,
+            maxTrades: isBlankInput(maxTradesRaw) ? 0 : Math.floor(maxTrades),
+            maxAmount: isBlankInput(maxAmountRaw) ? 0 : maxAmount,
             createdAt: isEditing ? this.autoTrade.configs[editingIndex].createdAt : Date.now()
         };
 
         if (isEditing) {
+            // 编辑配置：清除该配置“已达最大交易次数”的提示标记（例如用户上调了
+            // maxTrades，达到新上限时应能再次提示）；旧代码/方向的标记一并清除。
+            if (!this.autoTrade.maxTradesNotified) this.autoTrade.maxTradesNotified = {};
+            const prevConfig = this.autoTrade.configs[editingIndex];
+            if (prevConfig) {
+                delete this.autoTrade.maxTradesNotified[prevConfig.code + '-' + prevConfig.direction];
+            }
+            delete this.autoTrade.maxTradesNotified[config.code + '-' + config.direction];
             // 更新原有配置
             this.autoTrade.configs[editingIndex] = config;
             this.showNotification(I18n.t('auto.configUpdated'));
@@ -6214,6 +7212,11 @@ class StockSimulator {
             this.autoTrade.editingIndex--;
         }
 
+        // 清除被删配置的“已达最大交易次数”提示标记
+        const removedConfig = this.autoTrade.configs[index];
+        if (removedConfig && this.autoTrade.maxTradesNotified) {
+            delete this.autoTrade.maxTradesNotified[removedConfig.code + '-' + removedConfig.direction];
+        }
         this.autoTrade.configs.splice(index, 1);
         this.renderAutoTradeStockList();
         this.saveAutoTradeState();
@@ -6313,6 +7316,7 @@ class StockSimulator {
             records: this.autoTrade.records,
             stockTradeCounts: this.autoTrade.stockTradeCounts,
             lastTradeTimes: this.autoTrade.lastTradeTimes,
+            maxTradesNotified: this.autoTrade.maxTradesNotified || {},
             maxTotalTrades: this.autoTrade.maxTotalTrades
         };
         
@@ -6361,6 +7365,7 @@ class StockSimulator {
         // P1 Fix: 与 loadSave 保持一致，从存档恢复风控计数器
         this.autoTrade.stockTradeCounts = this.currentSave.autoTrade.stockTradeCounts || {};
         this.autoTrade.lastTradeTimes = this.currentSave.autoTrade.lastTradeTimes || {};
+        this.autoTrade.maxTradesNotified = this.currentSave.autoTrade.maxTradesNotified || {};
         this.autoTrade.maxTotalTrades = this.currentSave.autoTrade.maxTotalTrades || 100;
         this.syncAutoTradeMaxTotalInput();
         
@@ -6395,6 +7400,7 @@ class StockSimulator {
         this.autoTrade.records = [];
         this.autoTrade.stockTradeCounts = {};
         this.autoTrade.lastTradeTimes = {};
+        this.autoTrade.maxTradesNotified = {};
         this.autoTrade.maxTotalTrades = 100;
         this.autoTrade.limitNotified = false;
         this.autoTrade.editingIndex = null;
@@ -6413,6 +7419,7 @@ class StockSimulator {
             records: [],
             stockTradeCounts: {},
             lastTradeTimes: {},
+            maxTradesNotified: {},
             maxTotalTrades: 100
         };
         
@@ -6527,6 +7534,9 @@ class StockSimulator {
         this.autoTrade.paused = false;
         // P1 Fix: 不再在“启动”时清零风控计数器；真正的停止（stopAutoTrade）才代表本轮结束。
         this.autoTrade.limitNotified = false;
+        // 启动=新一轮运行：清零熔断计数（风控计数器 stockTradeCounts/lastTradeTimes
+        // 仍保留，见上），否则上一轮残留的失败计数会让本轮很快再次自动暂停。
+        this.autoTrade.consecutiveFailures = 0;
         // P1-8 Fix: clear any pre-existing interval before starting a new one.
         if (this.autoTrade.interval) {
             clearInterval(this.autoTrade.interval);
@@ -6544,6 +7554,7 @@ class StockSimulator {
                 records: this.autoTrade.records,
                 stockTradeCounts: this.autoTrade.stockTradeCounts,
                 lastTradeTimes: this.autoTrade.lastTradeTimes,
+                maxTradesNotified: this.autoTrade.maxTradesNotified || {},
                 maxTotalTrades: this.autoTrade.maxTotalTrades
             };
             this.saveUsers();
@@ -6561,6 +7572,10 @@ class StockSimulator {
         // 如果从暂停恢复，仅重新启动定时器；风控计数器必须保留，
         // 否则“暂停→继续”即可清零 maxTrades 与冷却时间。
         if (!this.autoTrade.paused) {
+            // Bug fix: 恢复运行时重置“连续失败”熔断计数（这是熔断器状态，不是
+            // maxTrades/冷却时间那类风控计数器）。不重置的话，恢复后下一次失败
+            // 就会立刻再次触发自动暂停。
+            this.autoTrade.consecutiveFailures = 0;
             // 重新启动定时器（如果不存在）
             if (!this.autoTrade.interval) {
                 this.autoTrade.interval = setInterval(() => this.checkAutoTradeCondition(), this.refreshRate);
@@ -6617,6 +7632,7 @@ class StockSimulator {
         // 真正的停止才清零风控计数器（暂停/继续、加载存档都不应清零）
         this.autoTrade.lastTradeTimes = {};
         this.autoTrade.stockTradeCounts = {};
+        this.autoTrade.maxTradesNotified = {};
         this.autoTrade.limitNotified = false;
         
         // 保存自动交易状态到存档（保留配置）
@@ -6761,8 +7777,17 @@ class StockSimulator {
         const stockTradeCount = this.autoTrade.stockTradeCounts[stockTradeKey] || 0;
         
         if (config.maxTrades && stockTradeCount >= config.maxTrades) {
-            debugLog(`交易失败: ${config.name} 已达到最大交易次数 ${config.maxTrades}`);
-            this.addAutoTradeRecord(false, 0, `已达到最大交易次数 ${config.maxTrades}`, 0, config);
+            // Bug fix: 达到单股最大交易次数意味着“该配置已完成”，不是交易失败。
+            // 此前每次条件命中都会记一条失败记录：既不断挤占 50 条历史列表，
+            // 又把“连续失败 20 次”熔断器喂满，导致整个自动交易被自动暂停、
+            // 连累其他股票的配置。现在只在首次触达时记录一次（不计入失败
+            // 熔断），后续检查静默跳过；编辑该配置或停止自动交易时恢复提示。
+            if (!this.autoTrade.maxTradesNotified) this.autoTrade.maxTradesNotified = {};
+            if (!this.autoTrade.maxTradesNotified[stockTradeKey]) {
+                this.autoTrade.maxTradesNotified[stockTradeKey] = true;
+                debugLog(`配置已完成: ${config.name} 已达到最大交易次数 ${config.maxTrades}`);
+                this.addAutoTradeRecord(false, 0, I18n.t('auto.maxTradesReached', { max: config.maxTrades }), 0, config, null, 0, { countFailure: false });
+            }
             return;
         }
 
@@ -6891,13 +7916,8 @@ class StockSimulator {
                 return;
             }
 
-            if (!this.currentSave.settings.t0Mode) {
-                const dayTrades = this.currentSave.dayTrades[config.code] || { buy: 0, sell: 0 };
-                if (dayTrades.sell > 0) {
-                    this.addAutoTradeRecord(false, 0, I18n.t('auto.t1Blocked'), 0, config);
-                    return;
-                }
-            }
+            // T+1：与手动交易一致，仅限制“当日买入当日卖出”（见下方卖出数量
+            // 校验），允许当日卖出后买回（对齐真实 A 股规则）。
 
             // P1-2 Fix: round money to cents
             this.currentSave.fund = round2(this.currentSave.fund - totalCost);
@@ -6961,16 +7981,20 @@ class StockSimulator {
             // P1-2 Fix: round money to cents
             this.currentSave.fund = round2(this.currentSave.fund + totalIncome);
 
-            // P1-5 Fix: include sell fee in PnL (consistent with manual sell)
-            pnl = round2((price - holding.avgPrice) * config.quantity - fee);
+            // P1-5 Fix: include sell fee in PnL (consistent with manual sell).
+            // Bug fix: remove the exact proportional cost basis on a partial sell so the
+            // remaining totalCost cannot drift (see executeSellTrade).
+            const removedCost = round2(holding.totalCost * config.quantity / holding.quantity);
+            pnl = round2((price * config.quantity) - removedCost - fee);
 
             holding.quantity -= config.quantity;
-            // P1-2 Fix: round remaining cost basis to cents
-            holding.totalCost = round2(holding.avgPrice * holding.quantity);
+            holding.totalCost = round2(holding.totalCost - removedCost);
 
             if (holding.quantity === 0) {
                 delete this.currentSave.holdings[config.code];
                 debugLog(`持仓清零: ${config.name} 已从持仓列表中移除`);
+            } else {
+                holding.avgPrice = round2(holding.totalCost / holding.quantity);
             }
 
             if (!this.currentSave.dayTrades[config.code]) {
@@ -6985,9 +8009,10 @@ class StockSimulator {
             this.autoTrade.stockTradeCounts[stockTradeKey] = (this.autoTrade.stockTradeCounts[stockTradeKey] || 0) + 1;
             
             this.currentSave.gameStats.tradeCount++;
+            // Bug fix: 盈亏恰好为 0 的卖出既不算盈利也不算亏损（与手动交易一致）
             if (pnl > 0) {
                 this.currentSave.gameStats.profitCount++;
-            } else {
+            } else if (pnl < 0) {
                 this.currentSave.gameStats.lossCount++;
             }
         }
@@ -7002,15 +8027,22 @@ class StockSimulator {
             }
         }
 
+        // Bug fix: auto trades must use the same game-time record shape as manual ones
+        // (game day + game clock + pre-trade cash + cent-rounded amounts).
+        const autoStamp = this.getGameTimestamp();
+        const autoSignedAmount = config.direction === 'buy' ? -(amount + fee) : (amount - fee);
         this.currentSave.records.unshift({
-            time: Date.now(),
+            time: autoStamp.time,
+            dayIndex: autoStamp.dayIndex,
+            gameMinutes: autoStamp.gameMinutes,
+            fundBefore: saveSnapshot && Number.isFinite(saveSnapshot.fund) ? round2(saveSnapshot.fund) : null,
             code: config.code,
             name: config.name,
             type: config.direction,
             price,
             quantity: config.quantity,
-            amount: config.direction === 'buy' ? -(amount + fee) : (amount - fee),
-            pnl: config.direction === 'sell' ? pnl : 0
+            amount: round2(autoSignedAmount),
+            pnl: config.direction === 'sell' ? round2(pnl) : 0
         });
 
         if (this.currentSave.records.length > 100) {
@@ -7044,7 +8076,10 @@ class StockSimulator {
         }));
     }
 
-    addAutoTradeRecord(success, amount, message, pnl = 0, config = null, holding = null, currentPrice = 0) {
+    addAutoTradeRecord(success, amount, message, pnl = 0, config = null, holding = null, currentPrice = 0, options = {}) {
+        // countFailure=false marks a "no-fault" outcome (e.g. a config that reached its
+        // max trade count): it is logged, but it must not feed the failure breaker.
+        const countFailure = options.countFailure !== false;
         const record = {
             time: Date.now(),
             success,
@@ -7076,7 +8111,7 @@ class StockSimulator {
             this.autoTrade.stats.successTrades++;
             this.autoTrade.stats.totalPnl += pnl;
             this.autoTrade.consecutiveFailures = 0;
-        } else {
+        } else if (countFailure) {
             this.autoTrade.stats.failedTrades++;
             this.autoTrade.consecutiveFailures = (this.autoTrade.consecutiveFailures || 0) + 1;
             const maxFailures = this.autoTrade.maxConsecutiveFailures || 20;
@@ -7087,6 +8122,10 @@ class StockSimulator {
                 }
                 this.autoTrade.paused = true;
                 this.showNotification(I18n.t('auto.failureLimitNotice', { max: maxFailures }), 'warning');
+                // Bug fix: the breaker flipped the paused flag internally but the status
+                // text / indicator / pause button kept showing "running", so clicking
+                // "暂停" actually resumed. Re-render the status right after tripping.
+                this.updateAutoTradeStatus();
             }
         }
 

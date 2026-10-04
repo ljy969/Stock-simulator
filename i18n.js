@@ -163,6 +163,14 @@ class I18nManager {
      * 在初始化和语言切换后调用
      */
     applyToDOM() {
+        // Bug fix (#18): the <title> stayed Chinese in English mode. There is no element
+        // to tag, so sync it from the same app.title key used by the header logo.
+        try {
+            document.title = this.t('app.title');
+        } catch (e) {
+            // title is cosmetic; never let it break the language switch
+        }
+
         // 1. data-i18n: 设置 textContent
         document.querySelectorAll('[data-i18n]').forEach(el => {
             const key = el.getAttribute('data-i18n');

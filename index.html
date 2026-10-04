@@ -45,6 +45,15 @@
                 <h2 data-i18n="save.title">选择存档</h2>
                 <div id="save-list" class="save-list"></div>
                 <button id="new-game-btn" class="btn-primary" data-i18n="save.newGame">+ 开启新局</button>
+                <div class="save-transfer">
+                    <button id="import-single-save-btn" class="btn-secondary" data-i18n="save.importSingle">导入单个存档</button>
+                    <button id="import-all-data-btn" class="btn-secondary" data-i18n="save.importAll">导入所有数据</button>
+                    <button id="export-all-data-btn" class="btn-secondary" data-i18n="save.exportAll">导出所有数据</button>
+                </div>
+                <div class="save-account-actions">
+                    <button id="change-password-btn-save" class="btn-secondary" data-i18n="profile.changePassword">修改密码</button>
+                    <button id="delete-account-btn-save" class="btn-secondary btn-danger" data-i18n="profile.deleteAccount">注销账户</button>
+                </div>
                 <button id="logout-btn" class="btn-secondary" data-i18n="save.logout">退出登录</button>
             </div>
         </div>
@@ -62,6 +71,17 @@
                 <div class="modal-actions">
                     <button id="cancel-rename-btn" class="btn-secondary" data-i18n="common.cancel">取消</button>
                     <button id="confirm-rename-btn" class="btn-primary" data-i18n="common.confirm">确认</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 从备份文件选择要导入的存档 -->
+        <div id="import-pick-modal" class="modal">
+            <div class="modal-content">
+                <h3 data-i18n="importPick.title">选择要导入的存档</h3>
+                <div id="import-pick-list" class="import-pick-list"></div>
+                <div class="modal-actions">
+                    <button id="import-pick-cancel" class="btn-secondary" data-i18n="common.cancel">取消</button>
                 </div>
             </div>
         </div>
@@ -151,10 +171,10 @@
                         <div class="search-box">
                             <input type="text" id="stock-search" placeholder="搜索股票代码/名称" data-i18n-placeholder="market.searchPlaceholder">
                         </div>
-                        <div class="watchlist-toggle">
+                        <div class="market-sidebar-actions">
                             <button id="watchlist-toggle-btn" class="btn-watchlist" data-i18n="market.watchlistView">查看自选</button>
+                            <button id="reset-kline-btn" class="btn-watchlist btn-reset-kline" title="重置K线" data-i18n-title="market.resetKline" data-i18n-aria-label="market.resetKline" data-i18n="market.resetKline">🔄 重置K线</button>
                         </div>
-                        <button id="reset-kline-btn" class="btn-watchlist btn-reset-kline" title="重置K线" data-i18n-title="market.resetKline" data-i18n-aria-label="market.resetKline" data-i18n="market.resetKline">🔄 重置K线</button>
                         <div class="stock-list-header">
                             <span class="sortable" data-sort="name"><span data-i18n="market.colName">股票</span><span class="sort-indicator"></span></span>
                             <span class="sortable" data-sort="price"><span data-i18n="market.colPrice">最新价</span><span class="sort-indicator"></span></span>
@@ -401,14 +421,14 @@
 
                         <div id="risk-panel" class="auto-trade-form">
                             <div class="form-row">
-                                <label data-i18n="auto.stopLoss">止损价格</label>
+                                <label data-i18n="auto.stopLoss">止损金额</label>
                                 <input type="number" id="auto-stop-loss" step="0.01" placeholder="输入止损金额（正数或负数）" data-i18n-placeholder="auto.stopLossPlaceholder">
-                                <small class="form-hint" data-i18n="auto.stopLossHint">输入亏损金额阈值，如：100 或 -100，留空则不设置</small>
+                                <small class="form-hint" data-i18n="auto.stopLossHint">亏损金额达到该阈值时卖出，如：100 或 -100，留空则不设置</small>
                             </div>
                             <div class="form-row">
-                                <label data-i18n="auto.takeProfit">止盈价格</label>
-                                <input type="number" id="auto-take-profit" step="0.01" placeholder="输入止盈价" data-i18n-placeholder="auto.takeProfitPlaceholder">
-                                <small class="form-hint" data-i18n="auto.takeProfitHint">留空则不设置止盈</small>
+                                <label data-i18n="auto.takeProfit">止盈金额</label>
+                                <input type="number" id="auto-take-profit" step="0.01" placeholder="输入止盈金额（正数）" data-i18n-placeholder="auto.takeProfitPlaceholder">
+                                <small class="form-hint" data-i18n="auto.takeProfitHint">盈利金额达到该值时卖出，留空则不设置</small>
                             </div>
                             <div class="form-row">
                                 <label data-i18n="auto.maxTrades">最大交易次数</label>
@@ -582,8 +602,6 @@
                     </div>
 
                     <div class="profile-actions">
-                        <button id="export-save-btn" class="btn-secondary" data-i18n="profile.exportSave">导出存档</button>
-                        <button id="import-save-btn" class="btn-secondary" data-i18n="profile.importSave">导入存档</button>
                         <button id="new-game-from-profile" class="btn-primary" data-i18n="save.newGame">开启新局</button>
                         <button id="switch-save-btn" class="btn-secondary" data-i18n="profile.switchSave">切换存档</button>
                         <button id="change-password-btn" class="btn-secondary" data-i18n="profile.changePassword">修改密码</button>
@@ -692,7 +710,7 @@
                         <button id="time-preset-morning-open" class="btn-secondary btn-small" data-i18n="debug.presetMorningOpen">☀️ 上午开盘 (9:30)</button>
                         <button id="time-preset-early" class="btn-secondary btn-small" data-i18n="debug.presetEarly">🌅 早起的鸟儿 (9:35)</button>
                         <button id="time-preset-morning-close" class="btn-secondary btn-small" data-i18n="debug.presetMorningClose">⏰ 上午收盘前 (11:25)</button>
-                        <button id="time-preset-late" class="btn-secondary btn-small" data-i18n="debug.presetLate">🌙 夜猫子 (11:35)</button>
+                        <button id="time-preset-late" class="btn-secondary btn-small" data-i18n="debug.presetLate">🍱 午间休市 (11:35)</button>
                         <button id="time-preset-afternoon" class="btn-secondary btn-small" data-i18n="debug.presetAfternoon">🌤️ 下午开盘 (13:00)</button>
                         <button id="time-preset-close" class="btn-secondary btn-small" data-i18n="debug.presetClose">🌆 收盘前 (14:55)</button>
                         <button id="time-preset-random" class="btn-secondary btn-small" data-i18n="debug.presetRandom">🎲 随机时间</button>
@@ -721,6 +739,20 @@
             </div>
         </div>
 
+        <!-- 通用输入弹窗（#23：导入密码必须遮蔽输入，不能再用 window.prompt） -->
+        <div id="input-prompt-modal" class="modal">
+            <div class="modal-content">
+                <h3 id="input-prompt-title" data-i18n="prompt.title">请输入</h3>
+                <p id="input-prompt-message" class="input-prompt-message"></p>
+                <input type="text" id="input-prompt-field">
+                <div id="input-prompt-error" class="form-error"></div>
+                <div class="modal-actions">
+                    <button id="input-prompt-cancel" class="btn-secondary" data-i18n="common.cancel">取消</button>
+                    <button id="input-prompt-confirm" class="btn-primary" data-i18n="common.confirm">确认</button>
+                </div>
+            </div>
+        </div>
+
         <!-- 新手引导 -->
         <div id="tutorial-overlay" class="tutorial-overlay">
             <div class="tutorial-highlight"></div>
@@ -732,7 +764,7 @@
                 <p id="tutorial-text"></p>
                 <div class="tutorial-actions">
                     <button id="skip-tutorial" class="btn-text" data-i18n="tutorial.skip">跳过教程</button>
-                    <button id="next-tutorial" class="btn-primary" data-i18n="tutorial.next">下一步</button>
+                    <button id="next-tutorial" class="btn-primary">下一步</button>
                 </div>
             </div>
         </div>

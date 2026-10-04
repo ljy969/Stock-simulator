@@ -8,7 +8,7 @@
 
 A pure-entertainment, zero-stress Chinese A-share stock trading simulator platform. All data is generated and stored locally inside your browser without connecting to real market APIs. Users can learn trading rules, experience market fluctuations, and test strategies in a risk-free environment.
 
-> Version: v2.8.0
+> Version: v2.12.0
 > Updated: 2026-10
 
 ---
@@ -72,8 +72,8 @@ Positioned as a "pure entertainment" tool, it involves no real capital. All mark
 
 ### Core Features
 
-- **Full User System**: Supports registration, login, password changes, account deletion, and auto-login
-- **Multi-Save Management**: Each user can manage multiple independent saves (create, load, rename, delete, switch)
+- **Full User System**: Supports registration, login, password changes, account deletion, and remembering the last username
+- **Multi-Save Management**: Each user can manage up to 50 independent saves (create, load, rename, delete, switch); the save list shows current storage usage and warns as the browser's LocalStorage quota is approached
 - **300+ A-Share Stock Pool**: Covers 80+ sectors including Banking, Brokerages, Spirits, Pharma, Semiconductors, Clean Energy, Defense, etc.
 - **Realistic Market Simulation**: Random price fluctuations, volume linkages, 5-level Order Book, and K-line chart data
 - **Complete Trading Cycle**: Buy, sell, position management, order history, and real-time floating P&L calculation
@@ -91,7 +91,7 @@ Positioned as a "pure entertainment" tool, it involves no real capital. All mark
 - **Multi-Theme Support**: Dark (default), Light, and Festival themes
 - **Bilingual UI (Chinese/English)**: Built-in internationalization (i18n) system with one-click language switching; preferences are automatically saved
 - **Beginner Tutorial**: Guided 9-step walkthrough automatically triggered for new users
-- **Save File Import/Export**: Export encrypted user data files for cross-device migration
+- **Save File Import/Export**: Import/export encrypted backups two ways — a single save or an entire user's data — for flexible cross-device migration
 - **Responsive Design**: Compatible with desktop and mobile screens
 
 ---
@@ -118,7 +118,7 @@ Stock simulator/
 ├── game.js                 # Core game logic (6000+ lines)
 │   ├── LimitManager class           # Price limit and circuit breaker management
 │   └── StockSimulator class         # Main controller containing all business logic
-├── stockData.js            # A-share stock pool data (385 stocks)
+├── stockData.js            # A-share stock pool data (387 stocks)
 ├── achievements.js         # Achievement system configuration and logic
 ├── crypto.js               # Encryption utilities (XOR + Base64 + hashing + UUID)
 ├── i18n.js                 # Internationalization core module (I18nManager class)
@@ -194,9 +194,9 @@ All user data is stored in the browser's LocalStorage under the key `stock_simul
 
 **Feature List**:
 
-- Registration: Username 2-20 characters, password 6-20 characters, requires confirmation; usernames cannot be duplicated. Usernames may only contain Chinese characters, letters, digits, underscores, and hyphens, and reserved names such as `__proto__` / `constructor` are rejected (since v2.6.0)
-- Login: Password verified via hash comparison; supports Enter key for quick login
-- Auto-login: Records the most recent user after successful login and auto-logs in next time
+- Registration: Username 2-20 characters, password 6-20 characters, requires confirmation; usernames cannot be duplicated (case-insensitively — "Admin" and "admin" count as the same username). Usernames may only contain Chinese characters, letters, digits, underscores, and hyphens, and reserved names such as `__proto__` / `constructor` are rejected (since v2.6.0)
+- Login: Password verified via hash comparison; supports Enter key for quick login; username lookup is case-insensitive (different capitalization still signs in to the same account; legacy accounts that differ only by case still require an exact match)
+- Remember last user: records the most recent username after a successful login and prefills it next time (the password is never stored, so you still sign in manually)
 - Change Password: Requires verification of current password, new password requires confirmation
 - Delete Account: Requires typing `DELETE` to confirm; operation is irreversible
 - Data Migration: Old user data is automatically completed with missing fields (`tutorialCompleted`, `theme`, `refreshRate`, `lang`) on load
@@ -214,7 +214,7 @@ Each user can create multiple independent saves. Data between saves is completel
   fund: Number,                  // Current available funds (cents)
   initialFund: Number,           // Initial capital
   holdings: Object,              // Holdings dictionary, keyed by stock code
-  records: Array,                // Trade records (up to 100 retained)
+  records: Array,                // Trade records (with game dayIndex / game clock, up to 100 retained)
   watchlist: Array,              // Watchlist stock codes
   achievements: Array,           // Save-level achievements
   settings: {                    // Current game trading rules
@@ -242,7 +242,11 @@ Each user can create multiple independent saves. Data between saves is completel
 }
 ```
 
-**Save Operations**: Create, load, rename (1-20 characters), delete, switch. Supports export as an encrypted text file and import from file. Exported backups carry no password hash; importing a new username requires setting a 6-20 character password, and importing an existing username (overwrite/merge) requires verifying that account's current password. After a successful import you are returned to the login screen to sign in again.
+**Auto-save**: The market and the game clock are written to localStorage on every market tick (throttled to roughly once every 2 seconds), and also immediately when the tab is hidden (`visibilitychange`) or the page is closed/reloaded (`beforeunload`). Idling and then refreshing therefore no longer rewinds time or prices, and the last candle of the day matches the live price.
+
+**Multi-tab Merge (v2.10.0)**: When the same account is played in two tabs at once, `saveUsers()` reads the latest ciphertext from storage before writing and performs a three-way merge ("baseline when this session loaded" / "this tab's in-memory save" / "the save on disk"), adding deltas for funds, holding quantity and cost, trade records, daily trade counters, statistics, and auto-trade counters, so the tab that writes last no longer overwrites the other tab's progress. A `storage` event listener also notifies and refreshes the UI when another tab writes. The merge only sums deltas and does not resolve the same action performed twice inside one save (for example selling the same position in both tabs); in extreme cases a quantity is clamped to 0.
+
+**Save Operations**: Create, load, rename (1-20 characters), delete, switch. Import/export live on the **save-selection screen**: export any single save as an encrypted text file, or export/import a backup. Exported backups carry no password hash. **Import a Save** appends one chosen save (a fresh id is assigned) into the current account; **Import All Data** merges every save in the backup into the current account, automatically skipping saves whose id already exists. Neither import creates a new account, changes the current password or preferences, or requires re-login. Imports keep the backup's market snapshot (game clock, K-lines, random seed) and auto-trade counters/records; each account holds at most 50 saves, and any excess is truncated with an explicit notice.
 
 ### Market Simulation System
 
@@ -294,6 +298,8 @@ The trading system includes a complete buy, sell, validation, recording, and sta
 4. `recordTrade()` writes trade records
 5. `updateAfterTrade()` refreshes holdings and UI
 
+**Order Price Fields**: After a stock code is validated the current market price is filled in automatically. Once you edit a price yourself, market refresh no longer overwrites it (the field keeps your limit price) until you re-enter/switch the stock code or complete a trade.
+
 **Parameter Validation Rules**:
 
 - Must be within trading hours (9:30-11:30, 13:00-15:00)
@@ -303,11 +309,11 @@ The trading system includes a complete buy, sell, validation, recording, and sta
 - If the input price deviates from market price by more than 10%, user confirmation is required
 - Stock code must exist in the stock pool
 
-**T+1 Rules** (default mode):
+**T+1 Rules** (default mode, matching real A-shares):
 
-- Stocks sold on the same day cannot be bought back on the same day
 - Stocks bought on the same day cannot be sold on the same day (only when `t0Mode = false`)
-- The `dayTrades` field records daily buy/sell counts per stock
+- After selling on the same day you may buy the same stock back (as on the real A-share market); the re-bought portion is still subject to the rule above and only becomes sellable the next day
+- The `dayTrades` field records daily buy/sell quantities per stock
 
 **Commission Calculation**:
 
@@ -317,7 +323,7 @@ The trading system includes a complete buy, sell, validation, recording, and sta
 
 **Trade Unit**: At game start, you can choose "1 share" or "100 shares (1 lot)" as the minimum trade unit. All quantities are automatically rounded to this unit.
 
-**Trade Records**: Each trade records time, code, name, direction, price, quantity, amount, commission, and P&L. Up to 100 records per save.
+**Trade Records**: Each trade records the game day (`dayIndex`), the game clock (shown as "Day N HH:MM"), code, name, direction, price, quantity, amount, commission, and P&L. Up to 100 records per save.
 
 ### Automated Trading System
 
@@ -339,6 +345,8 @@ Automated trading is an advanced feature that allows users to configure automate
 | Max Trade Amount | Maximum trade amount per order |
 | Global Max Trades | Cumulative trade limit for the whole auto-trade run (default 100, editable on the Risk Control tab) |
 
+**Parameter Validation**: Trade quantity must be a positive integer no larger than 1,000,000,000 and a multiple of the trade unit; the profit target and take-profit amount must be positive; an empty optional risk-control field means "no limit". The full-position shortcut (manual and auto) reserves the buy fee.
+
 **Trigger Condition Explanation**:
 
 - **Price Threshold**: Triggers when current price is higher than/lower than/equal to the set value
@@ -348,7 +356,7 @@ Automated trading is an advanced feature that allows users to configure automate
 
 **Cooldown Mechanism**: To prevent repeated trades, each stock has a cooldown period after each trigger. Default is 5 seconds; 30 seconds in interval mode. Cooldowns and per-stock max trade counts are persisted with the save: pausing, resuming, or switching saves never resets them, and only "Stop" clears them.
 
-**Risk Control**: In addition to basic trigger conditions, sell operations also check stop-loss and take-profit. When the profit/loss amount reaches the stop-loss threshold (negative) or take-profit threshold (positive), a sell is automatically triggered. Only successful fills consume the global trade quota, while 20 consecutive failures trip a breaker that pauses auto trading and shows a notice. Once the global trade limit is reached, the status indicator switches to "Trade limit reached" and a notice appears once instead of failing silently.
+**Risk Control**: In addition to basic trigger conditions, sell operations also check stop-loss and take-profit. When the profit/loss amount reaches the stop-loss threshold (negative) or take-profit threshold (positive), a sell is automatically triggered. Only successful fills consume the global trade quota, while 20 consecutive failures trip a breaker that pauses auto trading and shows a notice (the status indicator refreshes immediately after pausing, and the breaker count resets on resume). A configuration reaching its own max trade count is treated as completed: it is logged once, does not feed the failure breaker, and does not affect other configurations; editing that configuration or stopping auto trading re-arms the notice. Once the global trade limit is reached, the status indicator switches to "Trade limit reached" and a notice appears once instead of failing silently.
 
 **Statistics and Records**: Automated trading maintains its own statistics (total trades, success/failure count, total P&L, remaining quota) and trade records (up to 50). You can view them on the "Trade Records" tab. Auto-trade buys also count toward save statistics (trade count, sector coverage, and max holdings), so holding-based achievements can be unlocked normally.
 
@@ -374,7 +382,7 @@ The achievement system is defined in [achievements.js](file:///c:/Users/Administ
 
 > Note: 9 achievements (`standing_guard`, `buy_high_sell_low`, `comeback_kid`, `diamond_hands`, `market_crash_survivor`, `contrarian`, `technical_trader`, `news_trader`, `market_beater`) rely on statistics that are not recorded yet, so they are shown as "Coming soon" on the achievement wall and do not unlock.
 
-**Detection Mechanism**: After each trade, `calculateSaveStats()` is called to calculate current save statistics, then `checkAchievements()` compares against unlock conditions for unearned achievements. Newly unlocked achievements trigger a notification and can be viewed on the profile page.
+**Detection Mechanism**: After each trade, `calculateSaveStats()` is called to calculate current save statistics, then `checkAchievements()` compares against unlock conditions for unearned achievements. Newly unlocked achievements trigger a notification and can be viewed on the profile page. Date/time-based achievements (intraday trading, indecisive, long-term shareholder, weekend warrior, early bird, night owl, etc.) are all judged on the **game calendar**: trade records store the game day (`dayIndex`) and the game clock, and game day 0 maps to the weekday of the save's creation date, independent of the real date.
 
 **Achievement Poster**: Each achievement can generate a 600×800 shareable poster via Canvas, including the achievement icon, name, tier, description, username, and date.
 
@@ -398,6 +406,7 @@ gameTime = {
 
 - Morning session: 9:30 - 11:30
 - Afternoon session: 13:00 - 15:00
+- Like the real A-share market the intervals are half-open: trading already stops exactly at 11:30 and 15:00, so the last tradable moments are 11:29 / 14:59
 - Outside these hours is non-trading time; the market stops updating and trading is disabled
 
 **Time Advancement**: Each market tick advances the clock by 1 game minute, running continuously through the full 24 hours from 9:30. Outside trading sessions the clock keeps moving but market data is completely frozen and trading is disabled; crossing midnight increments the game calendar day, and the new trading day is applied when the next session begins.
@@ -407,7 +416,7 @@ gameTime = {
 - Morning open (9:30)
 - Early bird (9:35)
 - Before morning close (11:25)
-- Night owl (11:35)
+- Lunch Break (11:35)
 - Afternoon open (13:00)
 - Before close (14:55)
 - Random time
@@ -526,7 +535,9 @@ The project includes a complete Chinese-English internationalization system, imp
 
 - Amount formatting: Chinese uses "万/亿" units; English uses "K/M/B" units
 - Date formatting: Uses `toLocaleString()` to format according to the current language locale
-- Achievement system: Achievement names and descriptions both support bilingual switching
+- Achievement system: Achievement names and descriptions both support bilingual switching (poster title/name/description font sizes shrink to fit the canvas width so long English text is not clipped by the border)
+- Page title: `document.title` is updated when the language changes
+- Auto-trade notice: the maximum-trade-count notification is localized instead of hard-coded Chinese
 
 ### Beginner Tutorial
 
@@ -542,7 +553,7 @@ First-time users are automatically prompted with a 9-step guided tutorial coveri
 8. Debug panel activation tip
 9. Closing remarks
 
-The tutorial is presented by highlighting target elements, floating tooltips, and arrow guides. It supports skipping, previous step, and next step. After completion, `tutorialCompleted = true` is marked in user data and the tutorial will no longer trigger automatically.
+The tutorial is presented by highlighting target elements, floating tooltips, and arrow guides. It supports skipping, previous step, and next step; the last step's button reads "Finish", which ends the tutorial and switches back to the market page. The tooltip measures its own size and is clamped to the viewport, scrolling when the content is long. After completion, `tutorialCompleted = true` is marked in user data and the tutorial will no longer trigger automatically.
 
 ### Data Security & Backup
 
@@ -552,21 +563,21 @@ The tutorial is presented by highlighting target elements, floating tooltips, an
 
 **Password Hashing (v2.5.0 Upgrade)**: Starting from v2.5.0, new user passwords are derived using **PBKDF2-SHA-256**, with **100,000 iterations + per-user random 16-byte salt** (storage format: `pbkdf2-sha256-100k$<saltHex>$<derivedHex>`). Users registered before v2.5.0 use the old 32-bit weak hash. After the first successful login, the password hash is **automatically upgraded** to the PBKDF2 format without any user action.
 
-**Save Export**: On the profile page, click "Export Save" to download all current user data encrypted as a `.txt` file. Filename format: `stock_simulator_backup_{username}_{timestamp}.txt`. The exported payload strips `passwordHash`, so backups never contain a password hash.
+**Save Export**: Export entries live on the save-selection screen. Click "Export" on a save card to export just that save (filename `stock_simulator_save_{username}_{saveName}_{timestamp}.txt`), or click "Export All Data" below for the entire account (filename `stock_simulator_backup_{username}_{timestamp}.txt`). Both payloads strips `passwordHash`, so backups never contain a password hash; export uses the same serializer as local storage, so the market snapshot (game clock, K-lines, random seed), daily trade counters, and the auto-trade configuration/counters/records are all included.
 
-**Save Import (v2.5.0 Hardened)**: Click "Import Save" and select a `.txt` file. The import process now includes:
+**Save Import (v2.5.0 Hardened)**: On the save-selection screen, choose **Import a Save** to append one save from a backup (if the file holds several saves, a picker lists them) into the current account, or **Import All Data** to import the backup's full user data. Both flows include:
 
 - **5 MB file size limit** (to prevent DoS)
 - **User data schema validation** (rejects malformed JSON, incorrect field types)
 - **Per-save field whitelist** (save name limited to Chinese/letters/numbers/common symbols, 1-20 characters; `tradeUnit` only accepts `{1, 100}`; `buyFee`/`sellFee` limited to `[0, 0.01]`)
-- **Same-name user conflict dialog** (choose "Overwrite", "Merge", or "Cancel"; merge preserves local preferences)
+- **Merge limit**: a single backup contributes at most 50 saves; any excess is truncated with a notice
+- **Full state preserved**: the market snapshot (game clock, K-lines, random seed), auto-trade counters (per-stock trade count / last trigger time), and auto-trade records are all restored on import
 - **All user-controllable strings are HTML-escaped before rendering** to prevent script injection via malicious save names
-- **Import authentication**: importing a new username requires setting a 6-20 character password; importing an existing username (overwrite/merge) requires entering that account's current password, and the import is aborted if verification fails
-- **Forced re-login after import**: a successful import never logs you in automatically; you are returned to the login screen and must sign in with the target account
+- **Merge into current account**: both imports only append/merge saves into the currently signed-in account (saves with existing ids are skipped); no new account is created, the current password/preferences stay untouched, and no re-login is needed
 
 **Write-Failure Protection (v2.6.0)**: If LocalStorage is not writable (private mode, quota exceeded, etc.), `saveUsers()` reports failure, the trade is rolled back to its pre-trade snapshot, and the user is notified — so the UI never shows a completed trade that was not persisted. The trade-success toast is likewise shown only after the data is successfully written.
 
-**Corrupted-Data Protection (v2.6.0)**: When `loadUsers()` fails to decrypt or parse, it first backs up the raw ciphertext to `stock_simulator_users_corrupted_backup_<timestamp>` before continuing, instead of overwriting it, preventing irreversible data loss.
+**Corrupted-Data Protection (v2.6.0)**: When `loadUsers()` fails to decrypt or parse, it first backs up the raw ciphertext to the fixed key `stock_simulator_users_corrupted_backup` (only the earliest copy is kept, so refreshing does not write a new copy every time) before continuing, instead of overwriting it, preventing irreversible data loss.
 
 **Right-click Menu**: The browser right-click menu is globally disabled to prevent users from copying page content.
 
@@ -595,13 +606,14 @@ The tutorial is presented by highlighting target elements, floating tooltips, an
 
 ### Circuit Breaker Mechanism
 
-- Circuit breaker threshold: Daily price change reaches 20%
-- When triggered, trading for that stock is paused for 3 tick cycles
+- Circuit breaker threshold: a single-tick move of ±5% (abnormal flash move)
+- Normal per-tick movement is banded within ±2% (up to +3% for the easter-egg stock), while a rare abnormal jump of ±4%~7% occurs with roughly 0.1% probability; the breaker exists to catch exactly this kind of anomaly
+- When triggered, trading for that stock is paused for 3 tick cycles (adjustable via `LimitManager.circuitBreakerCooldown`)
 - Circuit breaker state resets on trading day switch
 
 ### T+1 Settlement Rules
 
-- Default T+1 rule: Stocks bought on the same day can only be sold the next day; stocks sold on the same day cannot be bought back the same day
+- Default T+1 rule (matching real A-shares): stocks bought on the same day can only be sold the next day; after selling you may buy the stock back the same day, but the re-bought portion is likewise only sellable the next day
 - T+0 mode can be enabled in initial game settings to remove intraday turnaround restrictions
 
 ### Commissions
@@ -639,7 +651,7 @@ Login/Register Screen → Save Selection Screen → Game Setup Screen → Main G
 ### Save Selection Screen (save-select-screen)
 
 - Save list: Displays existing saves with name, creation time, and capital overview
-- Operations: Load, rename, delete, new game, log out
+- Operations: Load, rename, delete, export (per save), new game, import a save / import all data, export all data, change password, delete account, log out
 
 ### Game Setup Screen (game-setup-screen)
 
@@ -676,14 +688,14 @@ The top navigation bar contains five main pages:
 
 - Asset overview: total assets, market value, available cash, floating P&L, total return rate
 - Position table: stock, holdings, cost price, current price, market value, P&L, profit rate
-- Transaction record table: time, stock, direction, price, quantity, amount
+- Transaction record table: game day and time (Day N HH:MM), stock, direction, price, quantity, amount
 
 #### Profile Page (profile-page)
 
 - User info: avatar, username, registration time
 - Statistics: session count, transaction count, achievement count
 - Achievement wall: unlocked achievements grouped by rarity, can expand all
-- Action buttons: export/import save, new game, switch save, change password, log out, delete account
+- Action buttons: new game, switch save, change password, log out, delete account (save import/export and change-password/delete-account are also available on the save-selection screen)
 
 ### Modal Windows and Panels
 
@@ -694,6 +706,7 @@ The top navigation bar contains five main pages:
 - Achievement popup: new achievement unlock notification
 - Beginner tutorial: 9-step overlay guide
 - Rename save modal
+- Generic input modal: import conflict/auth and rename all reuse one masked input dialog with password masking and required-field validation
 
 ---
 
@@ -709,11 +722,11 @@ Password recovery is not supported. Please keep your password safe. If you forge
 
 ### Where is my data stored?
 
-All data is stored in the browser's LocalStorage and is not uploaded to any server. Clearing browser data or using private/incognito mode may delete your save data. You should back up your data via Export Save.
+All data is stored in the browser's LocalStorage and is not uploaded to any server. Clearing browser data or using private/incognito mode may delete your save data. Back up with "Export All Data" on the save-selection screen (you can also export a single save). If the same account is open in several tabs, each tab merges its deltas on write so progress is not silently overwritten — but playing one account in a single tab is still recommended.
 
 ### How do I migrate saves across devices?
 
-On the source device, open the Profile page and click Export Save to download a `.txt` file. On the target device, open the Profile page and click Import Save to select that file. Importing a new username asks you to set a new password; importing an existing username asks for its current password. After the import you are returned to the login screen — sign in with the target account to see the saves.
+On the source device's save-selection screen, click "Export All Data" to download a `.txt` file. On the target device, sign up or log in to the target account, open the save-selection screen, and click "Import All Data" to merge every save in the backup into that account (saves already there are skipped). To move just one save into an existing account, click "Export" on that save on the source device and use "Import a Save" on the target device. Imports stay inside the current account — no extra password setup or re-login is needed.
 
 ### Why can't I trade outside market hours?
 
@@ -778,7 +791,7 @@ The project is centered around two core classes:
 | Debug Panel | `showDebugPanel`, `debugSetTime`, `debugSetFund`, `debugUnlockAchievement`, `debugResetMarket` |
 | Tutorial System | `startTutorial`, `showTutorialStep`, `nextTutorial`, `endTutorial` |
 | Internationalization | `applyUserLanguage`, `onLanguageChanged`, `toggleLanguage` |
-| Utility Methods | `formatMoney`, `showScreen`, `switchTab`, `setTheme`, `exportSave`, `importSave` |
+| Utility Methods | `formatMoney`, `showScreen`, `switchTab`, `setTheme`, `exportAllData`, `exportSingleSave`, `importSave` |
 
 ### Startup Flow
 
@@ -787,7 +800,7 @@ The application startup logic is located in [game.js:7154-7176](file:///c:/Users
 1. `DOMContentLoaded` event fires
 2. Right-click menu is disabled globally
 3. `StockSimulator` is instantiated, and the constructor calls `init()`
-4. `init()` calls `I18n.init()` (initialize i18n), `I18n.applyToDOM()` (refresh static text), `loadUsers()` (load data and migrate), `bindEvents()` (bind all events), `applyUserLanguage()` (apply user language preference), and `checkAutoLogin()` (attempt auto-login)
+4. `init()` calls `I18n.init()` (initialize i18n), `I18n.applyToDOM()` (refresh static text), `loadUsers()` (load data and migrate), `bindEvents()` (bind all events), `applyUserLanguage()` (apply user language preference), and `checkAutoLogin()` (prefill the last username)
 5. Registers `I18n.onChange()` callback to auto-refresh all dynamic content on language switch
 6. Browser back-button behavior is handled via `popstate`
 
@@ -881,7 +894,7 @@ Copyright (c) 2026 MOX
 
 ---
 
-**Version**: v2.8.0
+**Version**: v2.12.0
 **Developer**: Moke Xintu (Bilibili)
 
 ---

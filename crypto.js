@@ -22,10 +22,22 @@ const Crypto = {
     PBKDF2_ITERATIONS: 100000,
 
     // 简单的异或加密
+    // #16 Fix: build the code units first, then join them in chunks. The old loop
+    // concatenated one character at a time, reallocating the whole prefix on every
+    // iteration, so re-encrypting a multi-save database (megabytes) cost hundreds of
+    // milliseconds per save. The output is byte-for-byte identical to the old one.
     xorEncrypt(text, key) {
+        const len = text.length;
+        if (len === 0) return '';
+        const keyLen = key.length;
+        const units = new Array(len);
+        for (let i = 0; i < len; i++) {
+            units[i] = text.charCodeAt(i) ^ key.charCodeAt(i % keyLen);
+        }
+        const CHUNK = 8192;
         let result = '';
-        for (let i = 0; i < text.length; i++) {
-            result += String.fromCharCode(text.charCodeAt(i) ^ key.charCodeAt(i % key.length));
+        for (let i = 0; i < len; i += CHUNK) {
+            result += String.fromCharCode.apply(null, units.slice(i, i + CHUNK));
         }
         return result;
     },

@@ -242,6 +242,8 @@ body.festival-theme {
 
 .auth-form input {
     width: 100%;
+    /* #22 Fix: inputs and the submit button used to touch with no gap at all. */
+    margin-bottom: 16px;
     padding: 16px 18px;
     background: rgba(22, 27, 34, 0.8);
     border: 1px solid rgba(88, 166, 255, 0.15);
@@ -572,7 +574,60 @@ body.festival-theme {
 
 .save-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 10px;
+}
+
+/* 存档导入/导出与账号操作按钮组（选择存档页） */
+.save-transfer,
+.save-account-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 12px;
+}
+
+.save-transfer .btn-secondary,
+.save-account-actions .btn-secondary {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 12px 8px;
+    font-size: 14px;
+    white-space: nowrap;
+}
+
+/* 从备份选择存档（单存档导入） */
+.import-pick-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 50vh;
+    overflow-y: auto;
+    margin: 16px 0;
+}
+
+.import-pick-item {
+    text-align: left;
+    padding: 12px 16px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.import-pick-item:hover {
+    border-color: var(--primary-color);
+}
+
+.import-pick-item strong {
+    display: block;
+    margin-bottom: 4px;
+}
+
+.import-pick-item span {
+    color: var(--text-secondary);
+    font-size: 13px;
 }
 
 .save-actions button {
@@ -588,12 +643,14 @@ body.festival-theme {
     color: white;
 }
 
-.btn-rename {
+.btn-rename,
+.btn-export {
     background: var(--bg-tertiary);
     color: var(--text-secondary);
 }
 
-.btn-rename:hover {
+.btn-rename:hover,
+.btn-export:hover {
     background: var(--border-color);
     color: var(--text-primary);
 }
@@ -631,6 +688,25 @@ body.festival-theme {
     border-color: var(--primary-color);
     color: white;
     box-shadow: 0 4px 12px rgba(88, 166, 255, 0.3);
+}
+
+/* #21 Fix: keep the two sidebar controls on one row so the stock list keeps its height. */
+.market-sidebar-actions {
+    display: flex;
+    gap: 8px;
+    padding: 12px 15px 0;
+}
+
+.market-sidebar-actions .btn-watchlist {
+    width: auto;
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+/* The reset button keeps an 8px top margin from its standalone layout; inside the
+   shared action row it must line up with the watchlist button. */
+.market-sidebar-actions .btn-reset-kline {
+    margin-top: 0;
 }
 
 /* 重置K线图 */
@@ -2098,6 +2174,38 @@ body.festival-theme {
     background: var(--border-color);
 }
 
+/* #16 Fix: save-list capacity / quota warning line */
+.save-capacity {
+    margin: 0 0 12px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+/* #23 Fix: masked input modal used by the import flow */
+.input-prompt-message {
+    margin: 0 0 14px;
+    color: var(--text-primary);
+    font-size: 14px;
+    line-height: 1.6;
+    white-space: pre-line;
+}
+
+#input-prompt-field {
+    width: 100%;
+    padding: 12px 14px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 15px;
+}
+
+#input-prompt-field:focus {
+    outline: none;
+    border-color: var(--primary-color);
+}
+
 /* 弹窗 */
 .modal {
     display: none;
@@ -2448,6 +2556,10 @@ body.festival-theme {
     padding: 20px;
     max-width: 320px;
     min-width: 250px;
+    /* #20 Fix: the up-to-9-step texts plus buttons can be taller than a small phone
+       viewport; scrolling keeps the whole tooltip reachable instead of clipped. */
+    max-height: calc(100vh - 40px);
+    overflow-y: auto;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
     z-index: 3001;
 }
@@ -2585,21 +2697,33 @@ body.festival-theme {
     }
     
     .auth-container {
-        padding: 32px 24px;
+        /* #21/#22 Fix: reserve the top strip for the floating language button so it can
+           no longer sit on top of a wrapped title. */
+        padding: 56px 24px 32px;
         border-radius: 20px;
     }
-    
+
     .auth-container h1 {
-        font-size: 26px;
+        /* #22 Fix: 26px wrapped "股市模拟器 - 纯娱乐版" onto two lines and stranded "版".
+           19px keeps both the Chinese and the English title on a single line at 375px. */
+        font-size: 19px;
         gap: 8px;
     }
-    
+
     .auth-container h1 .logo-icon {
-        font-size: 30px;
+        font-size: 24px;
     }
-    
+
+    .lang-toggle-btn {
+        top: 12px;
+        right: 12px;
+        width: 34px;
+        height: 34px;
+        font-size: 16px;
+    }
+
     .subtitle {
-        font-size: 14px;
+        font-size: 13px;
         margin-bottom: 24px;
     }
     
@@ -2793,7 +2917,69 @@ body.festival-theme {
     
     .market-sidebar {
         width: 100%;
-        max-height: 300px;
+        /* #21 Fix: the search box + two full-width buttons left room for barely two stock
+           rows. Give the list more height and keep the controls on one row. */
+        max-height: 58vh;
+    }
+
+    .search-box {
+        padding: 10px 12px;
+    }
+
+    .market-sidebar-actions {
+        padding: 8px 12px 0;
+    }
+
+    .portfolio-holdings,
+    .portfolio-records,
+    .trade-holdings {
+        /* #21 Fix: the holdings/records tables used to push the whole page sideways
+           (scrollWidth 580 on a 375px viewport). Scroll the table, not the page. */
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .holdings-table,
+    .records-table {
+        min-width: 560px;
+    }
+
+    /* #21 Fix: seven action buttons and four level badges overflowed to 517px. */
+    .profile-actions {
+        flex-wrap: wrap;
+    }
+
+    .profile-actions .btn-primary,
+    .profile-actions .btn-secondary {
+        flex: 1 1 44%;
+    }
+
+    .achievement-stats {
+        flex-wrap: wrap;
+        gap: 10px 14px;
+    }
+
+    /* #21 Fix: the "minimum trade unit" row was clipped ("100股(1"). */
+    .trade-unit {
+        flex-wrap: wrap;
+        gap: 10px 16px;
+    }
+
+    .setup-container {
+        padding: 24px 20px;
+        margin: 20px auto;
+    }
+
+    /* 导入/导出与账号操作按钮组在窄屏换行 */
+    .save-transfer,
+    .save-account-actions {
+        flex-wrap: wrap;
+    }
+
+    .save-transfer .btn-secondary,
+    .save-account-actions .btn-secondary {
+        flex: 1 1 45%;
+        white-space: normal;
     }
     
     .trade-container {
@@ -3035,6 +3221,25 @@ body.festival-theme {
     
     .achievement-wall {
         grid-template-columns: 1fr;
+    }
+
+    /* #21 Fix: one button per row and 2 badges per row on the narrowest phones. */
+    .profile-actions .btn-primary,
+    .profile-actions .btn-secondary {
+        flex: 1 1 100%;
+    }
+
+    .achievement-level {
+        flex: 1 1 44%;
+    }
+
+    .holdings-table,
+    .records-table {
+        min-width: 520px;
+    }
+
+    .save-capacity {
+        font-size: 12px;
     }
 }
 

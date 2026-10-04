@@ -1,6 +1,8 @@
 // A股股票池数据 (300+只常用股票)
 const StockPool = [
     // 金融 - 银行
+    // 补充 000001 平安银行：常见的沪深权重股此前缺失（深圳市场龙头银行股）
+    { code: '000001', name: '平安银行', industry: '银行' },
     { code: '600036', name: '招商银行', industry: '银行' },
     { code: '601398', name: '工商银行', industry: '银行' },
     { code: '601288', name: '农业银行', industry: '银行' },
@@ -349,6 +351,8 @@ const StockPool = [
     { code: '600754', name: '锦江酒店', industry: '酒店' },
     { code: '600258', name: '首旅酒店', industry: '酒店' },
     { code: '300144', name: '宋城演艺', industry: '旅游' },
+    // 补充 601888 中国中免：常见的沪深300权重股此前缺失（免税零售龙头）
+    { code: '601888', name: '中国中免', industry: '旅游' },
     { code: '000888', name: '峨眉山A', industry: '旅游' },
     { code: '000978', name: '桂林旅游', industry: '旅游' },
     { code: '600138', name: '中青旅', industry: '旅游' },

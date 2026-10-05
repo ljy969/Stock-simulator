@@ -8,7 +8,7 @@
 
 A pure-entertainment, zero-stress Chinese A-share stock trading simulator platform. All data is generated and stored locally inside your browser without connecting to real market APIs. Users can learn trading rules, experience market fluctuations, and test strategies in a risk-free environment.
 
-> Version: v2.13.2
+> Version: v2.13.4
 > Updated: 2026-10
 
 ---
@@ -245,7 +245,7 @@ Each user can create multiple independent saves. Data between saves is completel
 
 **Auto-save**: The market and the game clock are written to localStorage on every market tick (throttled to roughly once every 2 seconds), and also immediately when the tab is hidden (`visibilitychange`) or the page is closed/reloaded (`beforeunload`). Idling and then refreshing therefore no longer rewinds time or prices, and the last candle of the day matches the live price.
 
-**Multi-tab Merge (v2.10.0)**: When the same account is played in two tabs at once, `saveUsers()` reads the latest ciphertext from storage before writing and performs a three-way merge ("baseline when this session loaded" / "this tab's in-memory save" / "the save on disk"), adding deltas for funds, holding quantity and cost, trade records, daily trade counters, statistics, and auto-trade cooldowns, so the tab that writes last no longer overwrites the other tab's progress. A `storage` event listener also notifies and refreshes the UI when another tab writes; if another window deletes the current account, this tab immediately stops its market and auto-trade timers, clears the session, returns to the login screen with a notice, and never writes the account back (v2.13.2). The merge only sums deltas and does not resolve the same action performed twice inside one save (for example selling the same position in both tabs); in extreme cases a quantity is clamped to 0.
+**Multi-tab Merge (v2.10.0)**: When the same account is played in two tabs at once, `saveUsers()` reads the latest ciphertext from storage before writing and performs a three-way merge ("baseline when this session loaded" / "this tab's in-memory save" / "the save on disk"), adding deltas for funds, holding quantity and cost, trade records, daily trade counters, statistics, and auto-trade cooldowns, so the tab that writes last no longer overwrites the other tab's progress. A `storage` event listener also notifies and refreshes the UI when another tab writes; if another window deletes the current account, this tab immediately stops its market and auto-trade timers, clears the session, returns to the login screen with a notice, and never writes the account back (v2.13.2); and if another window deletes a **different account** (this tab is playing another one), this tab also drops that account from memory so that the storage change on disk wins — a later auto-save or trade save can no longer write the deleted account back and resurrect it (v2.13.3). The merge only sums deltas and does not resolve the same action performed twice inside one save (for example selling the same position in both tabs); in extreme cases a quantity is clamped to 0.
 
 **Save Operations**: Create, load, rename (1-20 characters), delete, switch. Import/export live on the **save-selection screen**: export any single save as an encrypted text file, or export/import a backup. Exported backups carry no password hash. **Import a Save** appends one chosen save (a fresh id is assigned) into the current account; **Import All Data** merges every save in the backup into the current account, automatically skipping saves whose id already exists. Neither import creates a new account, changes the current password or preferences, or requires re-login. Imports keep the backup's market snapshot (game clock, K-lines, random seed) and auto-trade cooldowns/records; each account holds at most 50 saves, and any excess is truncated with an explicit notice.
 
@@ -532,7 +532,8 @@ The project includes a complete Chinese-English internationalization system, imp
 
 **Localization Adaptation**:
 
-- Amount formatting: Chinese uses "万/亿/万亿" units; English uses "K/M/B/T" units. The sign of a negative amount precedes the currency symbol (-¥42.33), and a negative that rounds to zero is shown unsigned (0.00%, ¥0.00)
+- Amount formatting: Chinese uses "万/亿/万亿" units; English uses "K/M/B/T" units. The unit is chosen from the rounded value, so a carry boundary promotes a tier (99999999.99 → ¥1.00亿, 9999.996 → ¥1.00万). The sign of a negative amount precedes the currency symbol (-¥42.33), and a negative that rounds to zero is shown unsigned (0.00%, ¥0.00)
+- Detail tables: money cells in row-by-row tables (holdings detail, trade records) are not unit-abbreviated — they keep full cents (e.g. ¥12.51, ¥1200.96) so one row uses a single consistent style; summary figures (total assets, total market value, floating P&L) still use the units above
 - Date formatting: Uses `toLocaleString()` to format according to the current language locale
 - Achievement system: Achievement names and descriptions both support bilingual switching (poster title/name/description font sizes shrink to fit the canvas width so long English text is not clipped by the border)
 - Page title: `document.title` is updated when the language changes
@@ -798,7 +799,7 @@ The project is centered around two core classes:
 
 **`LimitManager`** ([game.js:4-108](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L4-L108)): manages price limits and circuit breakers, calculates price boundaries, and tracks breaker states.
 
-**`StockSimulator`** ([game.js:563-8333](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L563-L8333)): the main controller running as the singleton `window.game`, containing the complete business logic. The main method groups are as follows:
+**`StockSimulator`** ([game.js:563-8375](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L563-L8375)): the main controller running as the singleton `window.game`, containing the complete business logic. The main method groups are as follows:
 
 | Module | Main Methods |
 | --- | --- |
@@ -819,7 +820,7 @@ The project is centered around two core classes:
 
 ### Startup Flow
 
-The application startup logic is located in [game.js:8336-8358](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L8336-L8358):
+The application startup logic is located in [game.js:8378-8400](file:///c:/Users/Administrator/Documents/trae_projects/Stock%20simulator/game.js#L8378-L8400):
 
 1. `DOMContentLoaded` event fires
 2. Right-click menu is disabled globally
@@ -918,7 +919,7 @@ Copyright (c) 2026 MOX
 
 ---
 
-**Version**: v2.13.2
+**Version**: v2.13.4
 **Developer**: Moke Xintu (Bilibili)
 
 ---

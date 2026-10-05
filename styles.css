@@ -563,8 +563,26 @@ body.festival-theme {
     background: rgba(88, 166, 255, 0.1);
 }
 
+.save-info {
+    /* Report fix #1: let the name column shrink inside the flex row so an
+       over-long legacy save name (data predating the 1-20 char limit) cannot
+       push the row - and the whole page - past the 600px container width. */
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
 .save-info h4 {
     margin-bottom: 5px;
+}
+
+.save-name {
+    /* Report fix #1: ellipsize over-long save names as a layout safety net.
+       The full name is exposed via the title attribute set on the element in
+       renderSaveList(); valid names (1-20 chars) never get truncated. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
 }
 
 .save-info p {
@@ -576,6 +594,9 @@ body.festival-theme {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
+    /* Report fix #1: keep the button group at its natural width so a long name
+       can never crowd the buttons out of the row. */
+    flex-shrink: 0;
 }
 
 /* 存档导入/导出与账号操作按钮组（选择存档页） */

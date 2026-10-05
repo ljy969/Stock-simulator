@@ -223,6 +223,15 @@ function escapeHtml(value) {
     });
 }
 
+// Report fix #2: a save name made of whitespace only (legacy data predating the trim)
+// used to pass the 1-20 char check and render as an invisible blank row in the save
+// list. Trim the name on display and fall back to the localized default ("存档 N" /
+// "Save N") when nothing remains, so every row always shows a readable name.
+function displaySaveName(save, index) {
+    const raw = (save && typeof save.name === 'string') ? save.name.trim() : '';
+    return raw !== '' ? raw : I18n.t('save.defaultName', { index: index + 1 });
+}
+
 // P2-9 Fix: gate business/debug logging behind one flag. High-frequency paths
 // (per-tick portfolio refresh, auto-trade condition checks) used to print holdings
 // and P&L detail on every tick, costing I/O and exposing the player's strategy.
@@ -370,8 +379,12 @@ function sanitizeSaveData(raw) {
     // P1-3b Fix: initialFund must be positive AND finite. The old Number.isFinite(0)
     // check let 0 through, making the portfolio divide by zero ("Infinity%").
     save.initialFund = rawInitialFund !== null ? rawInitialFund : save.fund;
-    save.name = (typeof raw.name === 'string' && raw.name.length >= 1 && raw.name.length <= 20)
-        ? raw.name : '';
+    // Report fix #2: trim before validating, so a whitespace-only name ("   ") can no
+    // longer slip through the 1-20 char check and later render as a blank row. An
+    // empty result falls back to the default name at render time (displaySaveName).
+    const trimmedSaveName = (typeof raw.name === 'string') ? raw.name.trim() : '';
+    save.name = (trimmedSaveName.length >= 1 && trimmedSaveName.length <= 20)
+        ? trimmedSaveName : '';
     // Name: restrict to safe character set (Chinese, letters, digits, limited punctuation)
     if (save.name && !/^[\u4e00-\u9fa5a-zA-Z0-9 \-_\.，。！？、：\u201c\u201d\u2018\u2019（）【】]+$/.test(save.name)) {
         save.name = '';
@@ -914,18 +927,34 @@ class StockSimulator {
     //   - users that exist only on disk (registered in another tab) are kept
     //   - saves that exist only on disk (created in another tab) are kept
     //   - the save this tab has open is three-way-merged against the baseline snapshot
-    // Deleting in another tab is treated as not-seen-yet (the local copy wins), which is
-    // the safe direction: it never silently destroys a just-created save.
+    //   - users deleted on disk are dropped from memory too, except the account this tab
+    //     is currently playing, so this tab's next write cannot bring a deleted account
+    //     back (#25). Deleting one *save* still keeps the local copy: only account
+    //     deletion is one-way.
     reconcileWithStorage(stored) {
         if (!stored) return false;
         let changed = false;
-        Object.keys(stored).forEach(username => {
-            if (!Object.prototype.hasOwnProperty.call(this.users, username)) {
-                this.users[username] = stored[username];
+        const username = this.currentUser && this.currentUser.username;
+        // #25 Fix: storage is authoritative for every account this tab is NOT playing.
+        // Previously only additions were merged, never deletions, so an account deleted
+        // in another tab stayed in this tab's memory and the next save (auto-save, trade,
+        // visibilitychange flush) wrote it, its password hash and every save straight
+        // back - deleting in one tab resurrected the account from another, even though
+        // the tab was logged in as a different user the whole time.
+        // Registration persists immediately, so there is never a user that exists only
+        // in memory and still needs to be kept here.
+        Object.keys(stored).forEach(diskUsername => {
+            if (!Object.prototype.hasOwnProperty.call(this.users, diskUsername)) {
+                this.users[diskUsername] = stored[diskUsername];
                 changed = true;
             }
         });
-        const username = this.currentUser && this.currentUser.username;
+        Object.keys(this.users).forEach(localUsername => {
+            if (localUsername !== username && !Object.prototype.hasOwnProperty.call(stored, localUsername)) {
+                delete this.users[localUsername];
+                changed = true;
+            }
+        });
         if (!username) return changed;
         const local = this.users[username];
         const remote = stored[username];
@@ -2147,7 +2176,10 @@ class StockSimulator {
             const item = document.createElement('div');
             item.className = 'save-item';
             // P0-1 Fix: escape user-controlled save name to prevent XSS
-            const saveName = escapeHtml(save.name || I18n.t('save.defaultName', { index: index + 1 }));
+            // Report fix #1/#2: displaySaveName() trims and falls back to the default
+            // name ("存档 N") for blank/whitespace-only legacy names; the title
+            // attribute exposes the full name when the CSS ellipsis truncates it.
+            const saveName = escapeHtml(displaySaveName(save, index));
             const dateStr = escapeHtml(new Date(save.createdAt).toLocaleDateString(I18n.getCurrentLanguage()));
             const fundText = escapeHtml(this.formatMoney(save.fund));
             const enterText = escapeHtml(I18n.t('common.enter'));
@@ -2156,7 +2188,7 @@ class StockSimulator {
             const deleteText = escapeHtml(I18n.t('common.delete'));
             item.innerHTML = `
                 <div class="save-info">
-                    <h4>${saveName}</h4>
+                    <h4 class="save-name" title="${saveName}">${saveName}</h4>
                     <p>${I18n.t('save.info', { fund: fundText, date: dateStr })}</p>
                 </div>
                 <div class="save-actions">
@@ -2533,7 +2565,9 @@ class StockSimulator {
     showRenameSaveModal(index) {
         this.renameSaveIndex = index;
         const save = this.currentUser.saves[index];
-        const currentName = save.name || I18n.t('save.defaultName', { index: index + 1 });
+        // Report fix #2: show a trimmed name (or the default) so a whitespace-only
+        // legacy name never ends up as an invisible prefill in the input.
+        const currentName = displaySaveName(save, index);
         
         const modal = document.getElementById('rename-save-modal');
         const input = document.getElementById('rename-save-input');
@@ -4992,18 +5026,18 @@ class StockSimulator {
                 const codeEsc = escapeHtml(code);
                 const nameEsc = escapeHtml(holding.name);
                 const qtyEsc = escapeHtml(String(holding.quantity));
-                const avgText = escapeHtml(holding.avgPrice.toFixed(2));
-                const priceText = escapeHtml(data.price.toFixed(2));
-                const mvText = escapeHtml(this.formatCurrency(marketValue));
-                const pnlText = escapeHtml(this.formatCurrency(pnl, true));
+                const avgText = escapeHtml(this.formatCurrencyExact(holding.avgPrice));
+                const priceText = escapeHtml(this.formatCurrencyExact(data.price));
+                const mvText = escapeHtml(this.formatCurrencyExact(marketValue));
+                const pnlText = escapeHtml(this.formatCurrencyExact(pnl, true));
                 const rateText = escapeHtml(this.formatPercent(pnlRate, true));
 
                 return `
                     <tr data-code="${codeEsc}" style="cursor: pointer; hover: background-color: rgba(88, 166, 255, 0.1);">
                         <td>${nameEsc}<br><small>${codeEsc}</small></td>
                         <td>${qtyEsc}</td>
-                        <td>¥${avgText}</td>
-                        <td>¥${priceText}</td>
+                        <td>${avgText}</td>
+                        <td>${priceText}</td>
                         <td>${mvText}</td>
                         <td class="${pnlClass}">${pnlText}</td>
                         <td class="${pnlClass}">${rateText}</td>
@@ -5125,18 +5159,18 @@ class StockSimulator {
                 const dateText = escapeHtml(dateRaw);
                 const recName = escapeHtml(record.name);
                 const recCode = escapeHtml(record.code);
-                const recPrice = escapeHtml(Number(record.price || 0).toFixed(2));
+                const recPrice = escapeHtml(this.formatCurrencyExact(Number(record.price || 0)));
                 const recQty = escapeHtml(String(record.quantity || 0));
-                const recAmt = escapeHtml(this.formatMoney(Math.abs(record.amount || 0)));
+                const recAmt = escapeHtml(this.formatCurrencyExact(Math.abs(Number(record.amount || 0))));
                 const typeText = escapeHtml(I18n.t(record.type === 'buy' ? 'common.buy' : 'common.sell'));
                 return `
                     <tr>
                         <td>${dateText}</td>
                         <td>${recName}<br><small>${recCode}</small></td>
                         <td class="${typeClass}">${typeText}</td>
-                        <td>¥${recPrice}</td>
+                        <td>${recPrice}</td>
                         <td>${recQty}</td>
-                        <td>¥${recAmt}</td>
+                        <td>${recAmt}</td>
                     </tr>
                 `;
             }).join('');
@@ -6891,7 +6925,9 @@ class StockSimulator {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        const safeName = String(save.name || ('save_' + (index + 1))).replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 30);
+        // Report fix #2: use the trimmed/fallback display name so a whitespace-only
+        // legacy name cannot produce an all-underscores filename.
+        const safeName = String(displaySaveName(save, index)).replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 30);
         a.download = `stock_simulator_save_${this.currentUser.username}_${safeName}_${Date.now()}.txt`;
         a.click();
         URL.revokeObjectURL(url);
@@ -6927,7 +6963,7 @@ class StockSimulator {
             return;
         }
         this.renderSaveList();
-        this.showNotification(I18n.t('notification.importSingleSuccess', { name: newSave.name || '' }));
+        this.showNotification(I18n.t('notification.importSingleSuccess', { name: displaySaveName(newSave, currentSaves.length - 1) }));
     }
     // 导入所有数据：把备份中的全部存档追加到当前登录账号（不创建新账号、不修改偏好、不重登）
     importAllDataFrom(userData) {
@@ -7000,7 +7036,7 @@ class StockSimulator {
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.className = 'import-pick-item';
-                const name = escapeHtml(save.name || I18n.t('save.defaultName', { index: index + 1 }));
+                const name = escapeHtml(displaySaveName(save, index));
                 const dateStr = escapeHtml(new Date(save.createdAt).toLocaleDateString(I18n.getCurrentLanguage()));
                 const fundText = escapeHtml(this.formatMoney(save.fund));
                 btn.innerHTML = `<strong>${name}</strong><span>${I18n.t('save.info', { fund: fundText, date: dateStr })}</span>`;
@@ -7027,19 +7063,32 @@ class StockSimulator {
     formatMoneyMagnitude(amount) {
         const value = Number(amount);
         const abs = Math.abs(Number.isFinite(value) ? value : 0);
-        if (window.I18n && I18n.getCurrentLanguage() === 'en-US') {
-            // 英文：使用 K/M/B/T 体系
-            if (abs >= 1000000000000) return (abs / 1000000000000).toFixed(2) + 'T';
-            if (abs >= 1000000000) return (abs / 1000000000).toFixed(2) + 'B';
-            if (abs >= 1000000) return (abs / 1000000).toFixed(2) + 'M';
-            if (abs >= 1000) return (abs / 1000).toFixed(2) + 'K';
-            return abs.toFixed(2);
+        // #26 Fix: the unit used to be chosen from the RAW value and the value was only
+        // rounded afterwards, so a value on a carry boundary kept the smaller unit once
+        // it rounded up: 99999999.99 printed "10000.00万" instead of "1.00亿", 9999.996
+        // printed "10000.00" instead of "1.00万", and the English -9999.994 produced a
+        // 9999.994 magnitude printed as "-¥10.00K".
+        // Pick the largest unit the raw value reaches, round the mantissa to 2 decimals,
+        // then promote a unit while the ROUNDED mantissa reaches the next unit. This
+        // keeps 9999.00 as "9999.00" (only values that genuinely round up cross over).
+        const isEn = window.I18n && I18n.getCurrentLanguage() === 'en-US';
+        const tiers = isEn ? [1000, 1000000, 1000000000, 1000000000000]
+                           : [10000, 100000000, 1000000000000];
+        const suffixes = isEn ? ['K', 'M', 'B', 'T'] : ['万', '亿', '万亿'];
+        let index = -1;
+        for (let i = 0; i < tiers.length; i++) {
+            if (abs >= tiers[i]) index = i;
         }
-        // 中文：使用 万/亿/万亿 体系
-        if (abs >= 1000000000000) return (abs / 1000000000000).toFixed(2) + '万亿';
-        if (abs >= 100000000) return (abs / 100000000).toFixed(2) + '亿';
-        if (abs >= 10000) return (abs / 10000).toFixed(2) + '万';
-        return abs.toFixed(2);
+        for (;;) {
+            const divisor = index < 0 ? 1 : tiers[index];
+            const text = (abs / divisor).toFixed(2);
+            const next = index + 1;
+            if (next < tiers.length && Number(text) * divisor >= tiers[next]) {
+                index = next;
+                continue;
+            }
+            return text + (index < 0 ? '' : suffixes[index]);
+        }
     }
 
     // 数值只会显示两位小数，所以 |amount| < 0.005 时会被渲染成 0.00；
@@ -7062,6 +7111,19 @@ class StockSimulator {
         const value = Number(amount);
         const safe = Number.isFinite(value) ? value : 0;
         const magnitude = this.formatMoneyMagnitude(safe);
+        if (this.isZeroMoneyText(magnitude)) return '¥' + magnitude;
+        const sign = safe < 0 ? '-' : (showPlus ? '+' : '');
+        return sign + '¥' + magnitude;
+    }
+
+    // 明细表专用：不做 万/亿/万亿（英文 K/M/B/T）缩写，保留完整两位小数。
+    // #27 Fix: 持仓明细要把成本价、现价、市值、盈亏放在同一行对比，缩写与不缩写混排
+    // 会让同一行出现两种风格（英文模式尤其明显：成交价 ¥12.51 / 市值 ¥1.21K），
+    // 因此这一整类明细行统一使用精确金额；金额缩写仍用于汇总卡片等场景。
+    formatCurrencyExact(amount, showPlus = false) {
+        const value = Number(amount);
+        const safe = Number.isFinite(value) ? value : 0;
+        const magnitude = Math.abs(safe).toFixed(2);
         if (this.isZeroMoneyText(magnitude)) return '¥' + magnitude;
         const sign = safe < 0 ? '-' : (showPlus ? '+' : '');
         return sign + '¥' + magnitude;
@@ -8294,7 +8356,7 @@ class StockSimulator {
 
                 if (record.direction === 'sell' && record.buyPrice > 0) {
                     detailsHtml += `<div class="trade-details">
-                        ${escapeHtml(I18n.t('auto.buyPriceLabel'))}: ¥${escapeHtml(Number(record.buyPrice).toFixed(2))} | ${escapeHtml(I18n.t('auto.sellPriceLabel'))}: ¥${escapeHtml(Number(record.sellPrice).toFixed(2))} | ${escapeHtml(I18n.t('auto.pnlLabel'))}: ${escapeHtml(this.formatPercent(Number(record.pnlPercent || 0), true))}
+                        ${escapeHtml(I18n.t('auto.buyPriceLabel'))}: ${escapeHtml(this.formatCurrencyExact(Number(record.buyPrice)))} | ${escapeHtml(I18n.t('auto.sellPriceLabel'))}: ${escapeHtml(this.formatCurrencyExact(Number(record.sellPrice)))} | ${escapeHtml(I18n.t('auto.pnlLabel'))}: ${escapeHtml(this.formatPercent(Number(record.pnlPercent || 0), true))}
                     </div>`;
                 }
 
@@ -8309,7 +8371,7 @@ class StockSimulator {
 
                 // P1-2b Fix: sign before the currency symbol; a tiny negative shows as ¥0.00.
                 const amountText = Math.abs(Number(record.pnl) || 0) >= 0.005
-                    ? escapeHtml(this.formatCurrency(record.pnl, true))
+                    ? escapeHtml(this.formatCurrencyExact(record.pnl, true))
                     : '--';
                 const statusText = record.success ? escapeHtml(I18n.t('common.statusSuccess')) : escapeHtml(I18n.t('common.statusFailed'));
 

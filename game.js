@@ -3828,6 +3828,7 @@ class StockSimulator {
         if (!ctx) return;
         
         const rect = canvas.parentElement.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
         const dpr = window.devicePixelRatio || 1;
         
         // 设置canvas的实际像素尺寸（考虑设备像素比）
@@ -3841,10 +3842,6 @@ class StockSimulator {
         canvas.style.width = rect.width + 'px';
         canvas.style.height = rect.height + 'px';
 
-        const padding = 40;
-        const chartWidth = rect.width - padding * 2;
-        const chartHeight = rect.height - padding * 2;
-        
         const state = this.chartState;
         const history = data.history;
         if (!history || history.length === 0) return;
@@ -3863,16 +3860,39 @@ class StockSimulator {
         
         // 计算价格范围（包含当前价格）
         const prices = visibleData.flatMap(h => [h.high, h.low]);
-        prices.push(data.price); // 添加当前价格
+        if (Number.isFinite(data.price)) prices.push(data.price); // 添加当前价格
         const dataMinPrice = Math.min(...prices);
         const dataMaxPrice = Math.max(...prices);
         const pricePadding = (dataMaxPrice - dataMinPrice) * 0.1;
         const minPrice = dataMinPrice - pricePadding;
         const maxPrice = dataMaxPrice + pricePadding;
-        const priceRange = maxPrice - minPrice;
+        // 价格区间为 0（例如历史被压平成同一价格）时，退化为一个最小可视区间，
+        // 否则后面按 priceRange 归一化会得到 NaN 坐标，整张图都画不出来。
+        const priceRange = (maxPrice - minPrice) > 0
+            ? maxPrice - minPrice
+            : Math.max(0.01, Math.abs(maxPrice) * 0.01);
 
-        // 清空画布
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // 左边距按价格标签的实际宽度动态计算。
+        // 固定 40px 时标签右对齐在 x = 35，四位数及以上的价格（1525.12）左端会落到
+        // 负坐标，被画布左边缘裁掉（只剩 525.12），贵州茅台这类高价股必现。
+        ctx.font = '12px Arial';
+        let maxPriceLabelWidth = 0;
+        for (let i = 0; i <= 5; i++) {
+            const labelWidth = ctx.measureText((maxPrice - (priceRange / 5) * i).toFixed(2)).width;
+            if (labelWidth > maxPriceLabelWidth) maxPriceLabelWidth = labelWidth;
+        }
+        const labelGutter = 12; // 右对齐的 5px 间隙 + 标签与网格线之间的留白
+        const padding = Math.min(
+            Math.max(40, Math.ceil(maxPriceLabelWidth) + labelGutter),
+            Math.max(40, Math.floor(rect.width * 0.4)) // 极窄画布下的兜底，保证绘图区仍为正
+        );
+        const chartWidth = rect.width - padding * 2;
+        const chartHeight = rect.height - padding * 2;
+        if (chartWidth <= 0 || chartHeight <= 0) return;
+
+        // 清空画布（ctx 已按 dpr 缩放，因此这里必须用 CSS 逻辑尺寸，
+        // 用 canvas.width（= 逻辑宽 * dpr）在高分屏上会只清掉一部分区域）
+        ctx.clearRect(0, 0, rect.width, rect.height);
         
         // 保存绘图参数供交互使用
         this.chartRenderParams = {
@@ -3889,7 +3909,9 @@ class StockSimulator {
             const y = padding + (chartHeight / 5) * i;
             ctx.beginPath();
             ctx.moveTo(padding, y);
-            ctx.lineTo(canvas.width - padding, y);
+            // ctx 已按 dpr 缩放，右边界必须用 CSS 逻辑宽度 rect.width，
+            // 用 canvas.width（设备像素）在 dpr>1 时会把网格线画到画布外。
+            ctx.lineTo(rect.width - padding, y);
             ctx.stroke();
 
             // 价格标签
@@ -3934,7 +3956,7 @@ class StockSimulator {
         ctx.setLineDash([5, 5]);
         ctx.beginPath();
         ctx.moveTo(padding, currentY);
-        ctx.lineTo(canvas.width - padding, currentY);
+        ctx.lineTo(rect.width - padding, currentY);
         ctx.stroke();
         ctx.setLineDash([]);
 
@@ -3960,7 +3982,8 @@ class StockSimulator {
         for (let i = 0; i < visibleData.length; i += timeStep) {
             const x = padding + i * (chartWidth / visibleCount) + (chartWidth / visibleCount) / 2;
             const time = visibleData[i].time || `${i + 1}`;
-            ctx.fillText(time, x, canvas.height - 10);
+            // 同理：坐标是 CSS 逻辑像素，用 rect.height 而不是设备像素的 canvas.height
+            ctx.fillText(time, x, rect.height - 10);
         }
     }
 
@@ -4011,6 +4034,7 @@ class StockSimulator {
 
     // 绘制成交量柱状图
     drawVolume(data) {
+        if (!data || !data.history) return;
         const canvas = document.getElementById('volume-canvas');
         if (!canvas) {
             debugLog('Volume canvas not found');
@@ -4041,20 +4065,11 @@ class StockSimulator {
         canvas.style.width = rect.width + 'px';
         canvas.style.height = rect.height + 'px';
 
-        const leftPadding = 60;
         const topPadding = 10;
         const rightPadding = 10;
         const bottomPadding = 20;
-        const chartWidth = rect.width - leftPadding - rightPadding;
-        const chartHeight = rect.height - topPadding - bottomPadding;
-        
-        debugLog('Volume chart params:', { leftPadding, topPadding, rightPadding, bottomPadding, chartWidth, chartHeight });
-        
-        if (chartHeight <= 0) {
-            debugLog('Chart height is negative:', chartHeight);
-            return;
-        }
-        
+        const minLeftPadding = 60;
+
         const state = this.chartState;
         const history = data.history;
         if (!history || history.length === 0) return;
@@ -4074,7 +4089,46 @@ class StockSimulator {
         const minVolume = 0;
         const volumeRange = maxVolume - minVolume;
 
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // 成交量按语言使用不同单位体系（与下方刻度绘制保持同一套逻辑）
+        const isEnglish = I18n.getCurrentLanguage() === 'en-US';
+        const formatVolume = (volume) => {
+            if (isEnglish) {
+                return volume >= 1000000000 ? (volume / 1000000000).toFixed(2) + 'B' :
+                       volume >= 1000000 ? (volume / 1000000).toFixed(2) + 'M' :
+                       volume >= 1000 ? (volume / 1000).toFixed(2) + 'K' :
+                       volume.toFixed(0);
+            }
+            return volume >= 100000000 ? (volume / 100000000).toFixed(2) + '亿' :
+                   volume >= 10000 ? (volume / 10000).toFixed(2) + '万' :
+                   volume.toFixed(0);
+        };
+
+        // 左边距按成交量刻度标签的实际宽度动态计算。
+        // 固定 60px 时，五位数以上的价格会带来 4 位数的“万/亿”标签（如 15957.82），
+        // 右对齐在 x = 55 的标签左端会落到负坐标而被画布左边缘裁掉。
+        ctx.font = '11px Arial';
+        let maxVolumeLabelWidth = 0;
+        for (let i = 0; i <= 3; i++) {
+            const labelWidth = ctx.measureText(formatVolume((volumeRange / 3) * i)).width;
+            if (labelWidth > maxVolumeLabelWidth) maxVolumeLabelWidth = labelWidth;
+        }
+        const labelGutter = 12;
+        const leftPadding = Math.min(
+            Math.max(minLeftPadding, Math.ceil(maxVolumeLabelWidth) + labelGutter),
+            Math.max(minLeftPadding, Math.floor(rect.width * 0.4))
+        );
+        const chartWidth = rect.width - leftPadding - rightPadding;
+        const chartHeight = rect.height - topPadding - bottomPadding;
+
+        if (chartWidth <= 0 || chartHeight <= 0) {
+            debugLog('Volume chart area is not positive:', { chartWidth, chartHeight });
+            return;
+        }
+
+        debugLog('Volume chart params:', { leftPadding, topPadding, rightPadding, bottomPadding, chartWidth, chartHeight });
+
+        // ctx 已按 dpr 缩放，清空必须用 CSS 逻辑尺寸
+        ctx.clearRect(0, 0, rect.width, rect.height);
         
         this.volumeRenderParams = {
             leftPadding, topPadding, rightPadding, bottomPadding, chartWidth, chartHeight,
@@ -4089,26 +4143,15 @@ class StockSimulator {
             const y = topPadding + (chartHeight / 3) * i;
             ctx.beginPath();
             ctx.moveTo(leftPadding, y);
-            ctx.lineTo(canvas.width - rightPadding, y);
+            // 同 K 线图：ctx 已按 dpr 缩放，右边界用 CSS 逻辑宽度
+            ctx.lineTo(rect.width - rightPadding, y);
             ctx.stroke();
 
             const volume = (volumeRange / 3) * i;
             ctx.fillStyle = '#888';
             ctx.font = '11px Arial';
             ctx.textAlign = 'right';
-            // 成交量格式化（根据语言使用不同的单位体系）
-            let volumeText;
-            if (I18n.getCurrentLanguage() === 'en-US') {
-                volumeText = volume >= 1000000000 ? (volume / 1000000000).toFixed(2) + 'B' :
-                             volume >= 1000000 ? (volume / 1000000).toFixed(2) + 'M' :
-                             volume >= 1000 ? (volume / 1000).toFixed(2) + 'K' :
-                             volume.toFixed(0);
-            } else {
-                volumeText = volume >= 100000000 ? (volume / 100000000).toFixed(2) + '亿' :
-                             volume >= 10000 ? (volume / 10000).toFixed(2) + '万' :
-                             volume.toFixed(0);
-            }
-            ctx.fillText(volumeText, leftPadding - 5, y + 4);
+            ctx.fillText(formatVolume(volume), leftPadding - 5, y + 4);
         }
 
         const barWidth = Math.max(2, (chartWidth / visibleCount) * 0.7);
@@ -4134,7 +4177,7 @@ class StockSimulator {
         for (let i = 0; i < visibleData.length; i += timeStep) {
             const x = leftPadding + i * (chartWidth / visibleCount) + (chartWidth / visibleCount) / 2;
             const time = visibleData[i].time || `${i + 1}`;
-            ctx.fillText(time, x, canvas.height - 5);
+            ctx.fillText(time, x, rect.height - 5);
         }
     }
 
